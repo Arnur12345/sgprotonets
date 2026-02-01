@@ -1,0 +1,100 @@
+# SGProtoNet Default Configuration
+# All hyperparameters with defaults. Override in experiment-specific YAML files.
+
+seed: 42
+
+# Model architecture
+model:
+  d_model: 256
+  d_visual: 768
+  d_semantic: 768
+  d_hidden: 512
+
+  visual_encoder:
+    name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"  # BiomedCLIP vision tower
+    type: "biomedclip"  # "biomedclip" | "vit"
+    freeze: true
+    unfreeze_last_n_blocks: 0
+
+  semantic_encoder:
+    name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"  # BiomedCLIP text tower
+    type: "biomedclip"  # "biomedclip" | "pubmedbert" | "biobert"
+    freeze: true
+    unfreeze_last_n_blocks: 0
+    max_length: 256
+
+  sgam:
+    num_heads: 4
+    dropout: 0.1
+
+  fusion:
+    dropout: 0.1
+
+  vis2sem:
+    d_hidden: 512
+
+  distance: "cosine"  # "cosine" | "euclidean"
+  prototype_mode: "vanilla"  # "vanilla" | "semantic_weighted"
+
+# Few-shot episode settings
+episode:
+  n_way: 5
+  k_shot: 1
+  q_query: 15
+
+# Data
+data:
+  dataset: "iu_xray"
+  data_dir: "data/processed/"
+  image_size: 224
+  # Class splits — defined per dataset
+  train_classes: ["cardiomegaly", "effusion", "infiltrate", "mass", "nodule", "pneumonia", "atelectasis", "consolidation"]
+  val_classes: ["pneumothorax", "edema", "emphysema"]
+  test_classes: ["hernia", "fibrosis", "pleural_thickening"]
+
+# Training
+training:
+  # Phase 1: Modality Alignment
+  phase1:
+    enabled: true
+    num_epochs: 20
+    batch_size: 64
+    lr: 1e-4
+    weight_decay: 1e-4
+
+  # Phase 2: Episodic Meta-Training
+  phase2:
+    num_epochs: 100
+    episodes_per_epoch: 500
+    lr: 1e-4
+    weight_decay: 1e-4
+    lambda_align: 0.5
+    lambda_consist: 0.1
+
+  optimizer: "adamw"
+  scheduler:
+    name: "cosine"  # "cosine" | "step"
+    warmup_epochs: 5
+    min_lr: 1e-6
+
+  # Evaluation during training
+  val_episodes: 200
+  val_every_n_epochs: 5
+
+  # Checkpointing
+  checkpoint_dir: "checkpoints/"
+  save_best: true
+  save_every_n_epochs: 10
+
+# Logging
+logging:
+  use_wandb: false
+  wandb_project: "sgprotonet"
+  wandb_entity: null
+  log_every_n_steps: 10
+
+# Inference
+inference:
+  text_strategy: "class_anchors"  # "class_anchors" | "vis2sem" | "visual_only"
+  num_eval_episodes: 600
+  confidence_interval: 0.95

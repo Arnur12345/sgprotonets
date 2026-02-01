@@ -1,0 +1,12 @@
+# 5-way 5-shot experiment config
+# Inherits from default.yaml
+
+episode:
+  n_way: 5
+  k_shot: 5
+  q_query: 15
+
+training:
+  phase2:
+    num_epochs: 80
+    episodes_per_epoch: 500
