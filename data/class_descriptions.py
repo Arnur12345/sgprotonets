@@ -1,5 +1,7 @@
 """Canonical text descriptions per pathology class for semantic anchors."""
 
+from __future__ import annotations
+
 # Each class has a canonical radiology-style description used as a semantic
 # anchor when per-image text is unavailable at inference time.
 CLASS_DESCRIPTIONS: dict[str, str] = {

@@ -1,246 +1,218 @@
-# CLAUDE.md — Semantic Guided Prototypical Networks (SGProtoNet)
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
-SGProtoNet is a few-shot medical image classification framework that enhances prototypical networks with semantic guidance from paired radiology reports. The core insight: prototypes computed from 1–5 examples are noisy; paired clinical text stabilizes and enriches them via cross-modal attention.
+SGProtoNet (Semantic Guided Prototypical Networks) is a few-shot learning framework for medical image classification that combines visual and semantic (text) information. The model uses BiomedCLIP encoders and operates on chest X-ray images with radiology reports.
 
-**Primary dataset**: IU Chest X-Ray (Indiana University) — ~7,500 chest X-ray images paired with radiology reports. Each sample has an image and a text report (findings + impressions) labeled with one or more pathology categories (cardiomegaly, effusion, infiltrate, no finding, etc.).
-
-**Task formulation**: N-way K-shot episodic classification. Standard settings: 5-way 1-shot and 5-way 5-shot. Start single-label (dominant finding per image), extend to multi-label later.
-
----
-
-## Architecture Components
-
-### 1. Visual Encoder
-- **Model**: ViT-B/16 (BiomedCLIP vision tower or CheXpert/MIMIC-CXR pretrained)
-- **Outputs**: [CLS] token (768-d global feature) AND full patch token sequence (196 × 768 spatial features)
-- **Default**: Frozen backbone. Fine-tune last N blocks only when explicitly enabled via config.
-
-### 2. Semantic Encoder
-- **Model**: PubMedBERT, BioBERT, or BiomedCLIP text tower
-- **Input**: Preprocessed radiology report (findings + impressions, boilerplate stripped)
-- **Outputs**: [CLS] token (768-d) and optionally full token sequence for cross-attention
-
-### 3. Projection Heads
-- Two separate MLPs mapping into a shared embedding space
-- Visual: 768 → 512 → d (default d=256), with LayerNorm + GELU
-- Semantic: 768 → 512 → d, same structure
-- Patch tokens also projected: 768 → d per token
-
-### 4. Semantic-Guided Attention Module (SGAM)
-- Cross-attention where semantic embedding is the Query, visual patch tokens are Keys/Values
-- Multi-head attention (default 4 heads)
-- Output: semantically-attended visual feature v_guided ∈ ℝ^d
-- This is the core contribution — language tells vision where to look
-
-### 5. Gated Fusion
-- Gate: g = σ(W_gate · [v_guided; s])
-- Fused: g ⊙ v_guided + (1 − g) ⊙ s
-- Final: MLP([v_cls; fused]) → ℝ^d
-- Output is the multimodal representation f_final used for prototype computation
-
-### 6. Prototype Computation
-- Vanilla: p_c = mean(f_i) for support examples i of class c
-- Enhanced: semantic-weighted aggregation using class-level description similarity as weights
-
-### 7. Distance & Classification
-- Support both Euclidean and Cosine distance (configurable, default cosine)
-- p(y=c | x_q) = softmax(−d(f_q, p_c))
-
-### 8. Inference Without Text (Three Strategies)
-- **Class-level semantic anchors**: canonical text descriptions per pathology class (always available)
-- **Visual-to-semantic projection**: auxiliary MLP predicting text embeddings from visual embeddings
-- **Fallback**: visual-only mode using just v_cls (graceful degradation)
-- Default: use class-level anchors; use per-image text when available
-
----
-
-## Directory Structure
-
-```
-sgprotonet/
-├── CLAUDE.md
-├── README.md
-├── pyproject.toml
-├── configs/
-│   ├── default.yaml          # Base config (all hyperparams with defaults)
-│   ├── 5way_1shot.yaml        # Overrides for 5-way 1-shot
-│   └── 5way_5shot.yaml        # Overrides for 5-way 5-shot
-├── data/
-│   ├── __init__.py
-│   ├── iu_xray.py             # IU Chest X-Ray dataset loader
-│   ├── preprocessing.py       # Report text cleaning, image transforms
-│   ├── episode_sampler.py     # N-way K-shot episodic sampler
-│   └── class_descriptions.py  # Canonical text descriptions per pathology class
-├── models/
-│   ├── __init__.py
-│   ├── sgprotonet.py          # Full SGProtoNet model (top-level nn.Module)
-│   ├── visual_encoder.py      # ViT wrapper, extracts [CLS] + patch tokens
-│   ├── semantic_encoder.py    # Text encoder wrapper
-│   ├── projections.py         # Visual and semantic projection heads
-│   ├── sgam.py                # Semantic-Guided Attention Module
-│   ├── fusion.py              # Gated fusion module
-│   ├── prototypes.py          # Prototype computation (vanilla + semantic-weighted)
-│   └── vis2sem.py             # Visual-to-semantic auxiliary projection
-├── training/
-│   ├── __init__.py
-│   ├── trainer.py             # Main training loop (two-phase)
-│   ├── losses.py              # L_proto, L_align (InfoNCE), L_consist
-│   ├── episode_loop.py        # Single episode forward/backward logic
-│   └── schedulers.py          # LR scheduling, warmup
-├── evaluation/
-│   ├── __init__.py
-│   ├── evaluate.py            # Meta-test evaluation over episodes
-│   ├── metrics.py             # Accuracy, confidence intervals, per-class stats
-│   └── visualize.py           # SGAM attention map visualization
-├── scripts/
-│   ├── train.py               # Entry point: python scripts/train.py --config configs/default.yaml
-│   ├── eval.py                # Entry point: python scripts/eval.py --checkpoint <path>
-│   ├── preprocess_iu_xray.py  # One-time data preprocessing script
-│   └── ablation.py            # Run ablation experiments
-└── tests/
-    ├── test_sgam.py
-    ├── test_episode_sampler.py
-    ├── test_prototype.py
-    └── test_fusion.py
-```
-
----
-
-## Tech Stack & Dependencies
-
-- **Python**: 3.10+
-- **Framework**: PyTorch 2.x
-- **Pretrained models**: HuggingFace Transformers (ViT, PubMedBERT), open_clip (BiomedCLIP)
-- **Config**: OmegaConf + YAML
-- **Logging**: Weights & Biases (wandb) — optional, toggleable in config
-- **Data**: torchvision transforms, pandas for metadata, nltk/regex for text preprocessing
-- **Testing**: pytest
-
-Install: `pip install torch torchvision transformers open_clip_torch omegaconf wandb pandas nltk pytest`
-
----
-
-## Coding Conventions
-
-### General
-- Type hints on all function signatures. Use `torch.Tensor` not `Any` for tensor args.
-- Docstrings on every public class and method (Google style).
-- Modules are small and single-purpose. One concept per file.
-- No wildcard imports. Explicit `from models.sgam import SGAM`.
-
-### PyTorch Specific
-- All model components inherit `nn.Module`.
-- Use `@torch.no_grad()` for inference/evaluation methods.
-- Shapes documented in comments: `# (batch, seq_len, d_model)`.
-- Keep `forward()` methods clean — helper logic goes in private methods.
-- Pretrained encoders wrapped in a class that exposes a uniform interface: `.encode(x) → (cls_token, full_sequence)`.
-
-### Config
-- All hyperparameters live in YAML configs, never hardcoded.
-- Access via OmegaConf DictConfig objects.
-- Every config key must have a default in `configs/default.yaml`.
-
-### Naming
-- Dimensions: `d_model` (shared embedding dim), `d_visual` (visual encoder dim), `d_semantic` (text encoder dim)
-- Variables: `v_cls` (visual CLS), `v_patches` (patch tokens), `s_cls` (semantic CLS), `v_guided` (SGAM output), `f_final` (fused multimodal feature), `proto` (prototype vector)
-- Files: snake_case. Classes: PascalCase. Constants: UPPER_SNAKE.
-
-### Testing
-- Every non-trivial module has a test file.
-- Tests verify output shapes, gradient flow, and basic correctness.
-- Run: `pytest tests/ -v`
-
----
-
-## Training Details
-
-### Two-Phase Training
-**Phase 1 — Modality Alignment (non-episodic)**:
-- Train projection heads + fusion modules on full dataset
-- Loss: L_align (InfoNCE contrastive) between matched image-text pairs
-- Encoders frozen
-- Purpose: establish a well-structured shared embedding space
-
-**Phase 2 — Episodic Meta-Training**:
-- Switch to N-way K-shot episode sampling
-- Loss: L_proto (cross-entropy on query classification) + λ₁·L_align + λ₂·L_consist
-- Default: λ₁=0.5, λ₂=0.1
-- Encoders frozen (optionally unfreeze last blocks via config)
-
-### Data Splits
-- Split BY CLASS, not by example. Example: 8 train / 3 val / 3 test classes.
-- Meta-test classes are never seen during training.
-- Defined in config, not hardcoded.
-
-### Key Hyperparameters (defaults)
-- `d_model`: 256
-- `n_way`: 5
-- `k_shot`: 1 (or 5)
-- `q_query`: 15
-- `sgam_heads`: 4
-- `distance`: "cosine"
-- `lr`: 1e-4 (AdamW)
-- `episodes_per_epoch`: 500
-- `num_epochs_phase1`: 20
-- `num_epochs_phase2`: 100
-
----
+**Key Concept**: Few-shot episodic meta-learning where each training episode contains N classes (n_way) with K support examples (k_shot) and Q query examples (q_query) per class. The model learns to classify novel medical conditions from very few examples.
 
 ## Common Commands
 
+### Setup and Installation
 ```bash
-# Preprocess IU Chest X-Ray data
-python scripts/preprocess_iu_xray.py --data_dir /path/to/iu_xray --output_dir data/processed/
+# Install in development mode
+pip install -e .
 
-# Train (full pipeline, both phases)
-python scripts/train.py --config configs/5way_1shot.yaml
-
-# Evaluate
-python scripts/eval.py --checkpoint checkpoints/best.pt --config configs/5way_1shot.yaml
-
-# Run ablation (removes one component at a time)
-python scripts/ablation.py --config configs/5way_1shot.yaml
-
-# Tests
-pytest tests/ -v
-
-# Visualize SGAM attention maps
-python -m evaluation.visualize --checkpoint checkpoints/best.pt --image <path> --text "<report>"
+# Install with dev dependencies (includes pytest)
+pip install -e ".[dev]"
 ```
 
----
+### Data Preprocessing
+```bash
+# Preprocess IU Chest X-Ray dataset (one-time setup)
+python scripts/preprocess_iu_xray.py \
+  --data_dir /path/to/raw/iu_xray \
+  --output_dir data/processed/
+```
 
-## Implementation Order
+### Training
+```bash
+# Train with default config
+python scripts/train.py --config configs/default.yaml
 
-Follow this sequence strictly. Each step should be validated before the next.
+# Train with experiment config (5-way 1-shot)
+python scripts/train.py --config configs/5way_1shot.yaml
 
-1. **Data pipeline**: `data/iu_xray.py`, `data/preprocessing.py`, `data/episode_sampler.py`
-2. **Visual-only baseline**: `models/visual_encoder.py` + `models/prototypes.py` → basic ProtoNet (no text)
-3. **Semantic encoder + projections**: `models/semantic_encoder.py`, `models/projections.py`, add L_align
-4. **SGAM**: `models/sgam.py` → integrate into forward pass
-5. **Gated fusion**: `models/fusion.py` → full multimodal prototype computation
-6. **Class-level anchors + vis2sem**: `data/class_descriptions.py`, `models/vis2sem.py`
-7. **Ablations and evaluation**: `scripts/ablation.py`, `evaluation/`
+# Override config values from command line
+python scripts/train.py --config configs/default.yaml \
+  episode.k_shot=5 training.phase2.lr=5e-5
+```
 
----
+### Evaluation
+```bash
+# Evaluate a trained checkpoint on validation set
+python scripts/eval.py --checkpoint checkpoints/best.pt --split val
 
-## Key Design Decisions to Remember
+# Evaluate on test set with config overrides
+python scripts/eval.py --checkpoint checkpoints/best.pt --split test \
+  inference.num_eval_episodes=1000
+```
 
-- **Never** average patch tokens into a single vector before SGAM — SGAM needs spatial structure.
-- **Always** L2-normalize embeddings before cosine distance computation.
-- **Text at test time is optional** — the pipeline must never crash if text is None. Use class-level anchors as fallback.
-- **Prototype computation is differentiable** — gradients flow through it during meta-training.
-- **Report preprocessing is not optional** — raw reports contain boilerplate that hurts performance. Always clean them.
-- **Reproducibility**: seed everything (torch, numpy, random, CUDA). Episode sampling must be deterministic given a seed.
+### Testing
+```bash
+# Run all tests
+pytest
 
----
+# Run specific test file
+pytest tests/test_episode_sampler.py
 
-## What NOT to Do
+# Run with verbose output
+pytest -v
 
-- Do not fine-tune entire ViT/BERT from the start. Frozen first, selective unfreeze later.
-- Do not use simple concatenation for fusion. Always use gated fusion.
-- Do not hardcode class names or splits. Everything through config.
-- Do not skip Phase 1 alignment training. The shared space quality matters.
-- Do not evaluate on classes seen during training. Few-shot eval requires held-out classes.
+# Run with coverage
+pytest --cov=.
+```
+
+## Architecture Overview
+
+### Two-Phase Training
+
+1. **Phase 1: Modality Alignment** (training/trainer.py:87-148)
+   - Non-episodic training with InfoNCE contrastive loss
+   - Aligns visual and semantic embeddings in shared space
+   - Trains Vis2Sem module for text-free inference
+   - Uses standard DataLoader with batch training
+
+2. **Phase 2: Episodic Meta-Training** (training/trainer.py:150-267)
+   - Episodic training with EpisodeSampler
+   - Computes prototypes from support set, classifies queries
+   - Combined loss: prototypical + alignment + consistency
+   - Uses class anchor embeddings for text-free episodes
+
+### Model Pipeline (models/sgprotonet.py)
+
+The forward pass flows through these components:
+
+1. **Visual Encoder** (models/visual_encoder.py) - Extracts [CLS] token and patch embeddings from images
+2. **Semantic Encoder** (models/semantic_encoder.py) - Encodes text reports into semantic embeddings
+3. **Projections** (models/projections.py) - Projects both modalities to shared d_model dimension
+4. **SGAM** (models/sgam.py) - Semantic-Guided Attention Module: semantic embedding queries visual patches via cross-attention
+5. **Gated Fusion** (models/fusion.py) - Fuses visual CLS, attended visual, and semantic features with learned gating
+6. **Prototype Computation** (models/prototypes.py) - Averages support set features per class
+7. **Distance & Classification** - Cosine or Euclidean distance to prototypes produces logits
+
+### Text Strategies
+
+The model supports three inference strategies (configs/default.yaml:103):
+
+- `class_anchors`: Use pre-computed class description embeddings (default, best for few-shot)
+- `vis2sem`: Generate semantic embedding from visual features via Vis2Sem module
+- `visual_only`: Use visual features only (fallback)
+
+### Episode Sampling (data/episode_sampler.py)
+
+EpisodeSampler yields batches structured as:
+```
+[support_cls0 (k_shot), ..., support_clsN (k_shot),
+ query_cls0 (q_query), ..., query_clsN (q_query)]
+```
+
+The `unpack_episode()` helper splits this into support/query sets and remaps labels to 0..N-1 within the episode.
+
+## Configuration System
+
+Uses OmegaConf with hierarchical YAML configs:
+
+- `configs/default.yaml` - Base configuration with all defaults
+- `configs/5way_1shot.yaml` - Override for 1-shot experiments
+- `configs/5way_5shot.yaml` - Override for 5-shot experiments
+
+Config merge order: default.yaml < experiment.yaml < CLI overrides
+
+**Important config sections**:
+- `model.*` - Architecture hyperparameters (d_model, encoder settings, SGAM, fusion)
+- `episode.*` - Few-shot episode configuration (n_way, k_shot, q_query)
+- `data.*` - Dataset paths and class splits (train_classes, val_classes, test_classes)
+- `training.phase1.*` - Phase 1 hyperparameters
+- `training.phase2.*` - Phase 2 hyperparameters with loss weights (lambda_align, lambda_consist)
+
+## Key Implementation Details
+
+### Class Splits
+The dataset has limited samples per class. Class splits are defined in configs (configs/default.yaml:50-55):
+- `train_classes`: Used for Phase 2 meta-training (at least 5 classes needed for 5-way)
+- `val_classes`: Used for validation episodes
+- `test_classes`: Used for final evaluation (may be empty if insufficient rare classes)
+
+Each class must have at least `k_shot + q_query` samples per episode.
+
+### Mixed Precision Training
+AMP (Automatic Mixed Precision) is enabled by default (configs/default.yaml:60). Use `GradScaler` for backward pass (training/trainer.py:42,136,229).
+
+### Checkpointing
+- `checkpoint_dir`: Where checkpoints are saved (default: checkpoints/)
+- `save_best`: Saves best.pt when validation accuracy improves
+- `save_every_n_epochs`: Periodic checkpoint saving
+
+Checkpoints include: model_state_dict, config, epoch, accuracy.
+
+### Loss Functions (training/losses.py)
+
+- **Prototypical Loss**: Cross-entropy between query logits and labels
+- **Alignment Loss**: InfoNCE contrastive loss between visual and semantic embeddings
+- **Consistency Loss**: MSE between fused features and visual-only features
+- **Vis2Sem Loss**: MSE for visual-to-semantic prediction
+
+## File Organization
+
+```
+sgprotonets/
+├── configs/          # YAML configuration files
+├── data/             # Dataset loaders and episode sampling
+│   ├── iu_xray.py           # IU X-Ray dataset class
+│   ├── episode_sampler.py   # N-way K-shot episode sampler
+│   ├── class_descriptions.py # Medical finding descriptions
+│   └── preprocessing.py      # Image transforms, text cleaning
+├── models/           # Neural network modules
+│   ├── sgprotonet.py        # Top-level model
+│   ├── visual_encoder.py    # BiomedCLIP vision encoder
+│   ├── semantic_encoder.py  # BiomedCLIP text encoder
+│   ├── sgam.py              # Semantic-Guided Attention Module
+│   ├── fusion.py            # Gated fusion
+│   ├── projections.py       # Modality projection heads
+│   ├── prototypes.py        # Prototype computation
+│   └── vis2sem.py           # Visual-to-semantic mapping
+├── training/         # Training infrastructure
+│   ├── trainer.py           # Two-phase trainer
+│   ├── episode_loop.py      # Single episode forward/loss
+│   ├── losses.py            # Loss functions
+│   └── schedulers.py        # LR schedulers
+├── evaluation/       # Evaluation and metrics
+│   ├── evaluate.py          # Meta-test evaluation
+│   └── metrics.py           # Classification metrics
+├── scripts/          # Entry points
+│   ├── train.py             # Training script
+│   ├── eval.py              # Evaluation script
+│   └── preprocess_iu_xray.py # Data preprocessing
+└── tests/            # Unit tests
+```
+
+## Working with This Codebase
+
+### Adding New Datasets
+1. Create dataset class in `data/` following IUXRayDataset pattern (data/iu_xray.py:16-80)
+2. Ensure dataset provides `class_indices` dict for EpisodeSampler
+3. Add preprocessing script in `scripts/`
+4. Update config with new class splits
+
+### Modifying the Model
+- Visual/semantic encoders support BiomedCLIP, ViT, PubMedBERT, BioBERT (check type in config)
+- SGAM uses cross-attention: semantic as Query, visual patches as Key/Value
+- Distance metric (cosine vs euclidean) is configurable in model config
+- Prototype mode: "vanilla" (mean pooling) or "semantic_weighted" (weighted by class anchors)
+
+### Debugging Episodes
+Use `unpack_episode()` to inspect episode structure. Labels are remapped to 0..N-1 within each episode, so model predictions are class indices within the episode, not global class IDs.
+
+### Hyperparameter Tuning
+Key hyperparameters for few-shot performance:
+- `episode.k_shot`: Number of support examples (1, 5, 10)
+- `training.phase2.lambda_align`: Alignment loss weight (0.1-1.0)
+- `training.phase2.lambda_consist`: Consistency loss weight (0.05-0.2)
+- `model.d_model`: Shared embedding dimension (128-512)
+- `model.sgam.num_heads`: Attention heads in SGAM
+
+### WandB Logging
+Enable with `logging.use_wandb=true` and set `logging.wandb_project` and `logging.wandb_entity` in config.

@@ -1,5 +1,7 @@
 """Text encoder wrapper for radiology reports."""
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
 from omegaconf import DictConfig
@@ -111,19 +113,44 @@ class SemanticEncoder(nn.Module):
         self, tokens: dict[str, torch.Tensor]
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode using open_clip text transformer."""
-        # open_clip text encoder returns the final hidden states
+        # Use the encoder's forward method which handles different architectures
         input_ids = tokens["input_ids"]
-        x = self.encoder.token_embedding(input_ids)
-        x = x + self.encoder.positional_embedding[: x.shape[1]]
-        x = x.permute(1, 0, 2)  # (seq_len, B, d)
-        x = self.encoder.transformer(x)
-        x = x.permute(1, 0, 2)  # (B, seq_len, d)
-        x = self.encoder.ln_final(x)
 
-        # CLS = EoT token (argmax of input_ids is the EoT position)
-        eot_indices = input_ids.argmax(dim=-1)
-        s_cls = x[torch.arange(x.shape[0]), eot_indices]  # (B, d_semantic)
-        s_seq = x  # (B, seq_len, d_semantic)
+        try:
+            # Try standard CLIP text encoder first
+            x = self.encoder.token_embedding(input_ids)
+            x = x + self.encoder.positional_embedding[: x.shape[1]]
+            x = x.permute(1, 0, 2)  # (seq_len, B, d)
+            x = self.encoder.transformer(x)
+            x = x.permute(1, 0, 2)  # (B, seq_len, d)
+            x = self.encoder.ln_final(x)
+
+            # CLS = EoT token (argmax of input_ids is the EoT position)
+            eot_indices = input_ids.argmax(dim=-1)
+            s_cls = x[torch.arange(x.shape[0]), eot_indices]  # (B, d_semantic)
+            s_seq = x  # (B, seq_len, d_semantic)
+        except AttributeError:
+            # HFTextEncoder case (BiomedCLIP with BERT backbone)
+            # The encoder.transformer is a BertModel
+            if hasattr(self.encoder, 'transformer'):
+                outputs = self.encoder.transformer(input_ids)
+                s_seq = outputs.last_hidden_state  # (B, seq_len, d_semantic)
+                s_cls = s_seq[:, 0]  # (B, d_semantic) - [CLS] token
+            elif hasattr(self.encoder, 'model'):
+                outputs = self.encoder.model(input_ids)
+                s_seq = outputs.last_hidden_state  # (B, seq_len, d_semantic)
+                s_cls = s_seq[:, 0]  # (B, d_semantic) - [CLS] token
+            else:
+                # Fallback: try calling the encoder directly as HF model
+                outputs = self.encoder(input_ids)
+                if hasattr(outputs, 'last_hidden_state'):
+                    s_seq = outputs.last_hidden_state
+                    s_cls = s_seq[:, 0]
+                else:
+                    # outputs is a tensor
+                    s_seq = outputs
+                    s_cls = outputs[:, 0]
+
         return s_cls, s_seq
 
     def _encode_hf(

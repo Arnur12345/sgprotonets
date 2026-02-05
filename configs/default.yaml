@@ -5,10 +5,10 @@ seed: 42
 
 # Model architecture
 model:
-  d_model: 256
+  d_model: 192
   d_visual: 768
   d_semantic: 768
-  d_hidden: 512
+  d_hidden: 384
 
   visual_encoder:
     name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"  # BiomedCLIP vision tower
@@ -40,7 +40,7 @@ model:
 episode:
   n_way: 5
   k_shot: 1
-  q_query: 15
+  q_query: 8  # Reduce to 1-2 if using rare classes (edema, hernia, fibrosis, pleural_thickening)
 
 # Data
 data:
@@ -48,24 +48,29 @@ data:
   data_dir: "data/processed/"
   image_size: 224
   # Class splits — defined per dataset
-  train_classes: ["cardiomegaly", "effusion", "infiltrate", "mass", "nodule", "pneumonia", "atelectasis", "consolidation"]
-  val_classes: ["pneumothorax", "edema", "emphysema"]
-  test_classes: ["hernia", "fibrosis", "pleural_thickening"]
+  # Using only classes with sufficient samples (>=9 for k_shot=1, q_query=8)
+  # For proper 5-way episodes, each split needs 5 classes
+  train_classes: ["effusion", "cardiomegaly", "infiltrate", "pneumothorax", "emphysema"]
+  val_classes: ["mass", "nodule", "pneumonia", "atelectasis", "consolidation"]
+  test_classes: []  # Not enough rare classes with sufficient samples - use val for now
 
 # Training
 training:
+  # Mixed precision training
+  use_amp: true
+
   # Phase 1: Modality Alignment
   phase1:
     enabled: true
     num_epochs: 20
-    batch_size: 64
+    batch_size: 16
     lr: 1e-4
     weight_decay: 1e-4
 
   # Phase 2: Episodic Meta-Training
   phase2:
     num_epochs: 100
-    episodes_per_epoch: 500
+    episodes_per_epoch: 250
     lr: 1e-4
     weight_decay: 1e-4
     lambda_align: 0.5

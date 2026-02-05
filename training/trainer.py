@@ -37,6 +37,10 @@ class Trainer:
         # Build model
         self.model = SGProtoNet(cfg).to(self.device)
 
+        # Mixed precision training
+        self.use_amp = cfg.training.get("use_amp", False)
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+
         # Setup logging
         self.wandb_run = None
         if cfg.logging.use_wandb:
@@ -117,18 +121,21 @@ class Trainer:
                 images = batch["image"].to(self.device)
                 texts = batch["report"]
 
-                out = self.model(images, texts)
-
-                # InfoNCE alignment loss
-                loss = alignment_loss(out["v_cls_proj"], out["s_proj"])
-
-                # Vis2Sem auxiliary loss
-                predicted_s = self.model.vis2sem(out["v_cls_proj"])
-                loss = loss + 0.5 * vis2sem_loss(predicted_s, out["s_proj"])
-
                 optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    out = self.model(images, texts)
+
+                    # InfoNCE alignment loss
+                    loss = alignment_loss(out["v_cls_proj"], out["s_proj"])
+
+                    # Vis2Sem auxiliary loss
+                    predicted_s = self.model.vis2sem(out["v_cls_proj"])
+                    loss = loss + 0.5 * vis2sem_loss(predicted_s, out["s_proj"])
+
+                self.scaler.scale(loss).backward()
+                self.scaler.step(optimizer)
+                self.scaler.update()
 
                 epoch_loss += loss.item()
                 n_batches += 1
@@ -202,23 +209,26 @@ class Trainer:
                 support_texts = support["report"]
                 query_texts = query["report"]
 
-                result = episode_step(
-                    model=self.model,
-                    support_images=support_images,
-                    support_texts=support_texts,
-                    support_labels=support_labels,
-                    query_images=query_images,
-                    query_texts=query_texts,
-                    query_labels=query_labels,
-                    n_way=ep_cfg.n_way,
-                    lambda_align=p2_cfg.lambda_align,
-                    lambda_consist=p2_cfg.lambda_consist,
-                    class_semantic_embeds=class_anchors,
-                )
-
                 optimizer.zero_grad()
-                result["loss"].backward()
-                optimizer.step()
+
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    result = episode_step(
+                        model=self.model,
+                        support_images=support_images,
+                        support_texts=support_texts,
+                        support_labels=support_labels,
+                        query_images=query_images,
+                        query_texts=query_texts,
+                        query_labels=query_labels,
+                        n_way=ep_cfg.n_way,
+                        lambda_align=p2_cfg.lambda_align,
+                        lambda_consist=p2_cfg.lambda_consist,
+                        class_semantic_embeds=class_anchors,
+                    )
+
+                self.scaler.scale(result["loss"]).backward()
+                self.scaler.step(optimizer)
+                self.scaler.update()
 
                 epoch_loss += result["loss"].item()
                 epoch_acc += result["accuracy"].item()
@@ -269,9 +279,12 @@ class Trainer:
         self.model.eval()
         ep_cfg = self.cfg.episode
 
+        # Use min of n_way or number of available classes
+        val_n_way = min(ep_cfg.n_way, len(val_dataset.classes))
+
         val_sampler = EpisodeSampler(
             dataset=val_dataset,
-            n_way=ep_cfg.n_way,
+            n_way=val_n_way,
             k_shot=ep_cfg.k_shot,
             q_query=ep_cfg.q_query,
             num_episodes=self.cfg.training.val_episodes,
@@ -291,7 +304,7 @@ class Trainer:
 
         for batch in val_loader:
             support, query, query_labels = unpack_episode(
-                batch, ep_cfg.n_way, ep_cfg.k_shot, ep_cfg.q_query
+                batch, val_n_way, ep_cfg.k_shot, ep_cfg.q_query
             )
 
             support_images = support["image"].to(self.device)
@@ -299,15 +312,16 @@ class Trainer:
             support_labels = support["label"].to(self.device)
             query_labels = query_labels.to(self.device)
 
-            episode_out = self.model.forward_episode(
-                support_images=support_images,
-                support_texts=support["report"],
-                support_labels=support_labels,
-                query_images=query_images,
-                query_texts=query["report"],
-                n_way=ep_cfg.n_way,
-                class_semantic_embeds=class_anchors,
-            )
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                episode_out = self.model.forward_episode(
+                    support_images=support_images,
+                    support_texts=support["report"],
+                    support_labels=support_labels,
+                    query_images=query_images,
+                    query_texts=query["report"],
+                    n_way=val_n_way,
+                    class_semantic_embeds=class_anchors,
+                )
 
             preds = episode_out["logits"].argmax(dim=-1)
             acc = (preds == query_labels).float().mean().item()

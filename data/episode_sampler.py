@@ -1,12 +1,15 @@
 """N-way K-shot episodic sampler for meta-learning."""
 
+from __future__ import annotations
+
 import random
+from typing import Dict, List, Tuple
 
 import torch
 from torch.utils.data import Dataset, Sampler
 
 
-class EpisodeSampler(Sampler[list[int]]):
+class EpisodeSampler(Sampler[List[int]]):
     """Samples N-way K-shot episodes from a dataset.
 
     Each episode consists of:

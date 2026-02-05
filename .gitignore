@@ -1,0 +1,52 @@
+# Dataset directories
+data/raw/
+data/processed/
+dataset.zip
+
+# Model checkpoints and weights
+checkpoints/
+*.pt
+*.pth
+
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Package information
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Logs and outputs
+*.log
+logs/
+runs/
+
+# WandB
+wandb/
+.wandb/
+
+# OS files
+.DS_Store
+Thumbs.db
