@@ -9,11 +9,15 @@ from pathlib import Path
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+import os
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from training.trainer import Trainer
+
 
 
 def seed_everything(seed: int) -> None:

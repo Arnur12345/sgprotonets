@@ -11,14 +11,14 @@ model:
   d_hidden: 384
 
   visual_encoder:
-    name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"  # BiomedCLIP vision tower
-    type: "biomedclip"  # "biomedclip" | "vit"
+    name: "google/vit-base-patch16-224"  # ViT-B/16 pretrained on ImageNet-21k
+    type: "vit"  # "biomedclip" | "vit"
     freeze: true
     unfreeze_last_n_blocks: 0
 
   semantic_encoder:
-    name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"  # BiomedCLIP text tower
-    type: "biomedclip"  # "biomedclip" | "pubmedbert" | "biobert"
+    name: "google-bert/bert-base-uncased"  # Standard BERT (generic, not biomedical)
+    type: "bert"  # "biomedclip" | "pubmedbert" | "biobert" | "bert"
     freeze: true
     unfreeze_last_n_blocks: 0
     max_length: 256
@@ -69,7 +69,7 @@ training:
 
   # Phase 2: Episodic Meta-Training
   phase2:
-    num_epochs: 100
+    num_epochs: 40
     episodes_per_epoch: 250
     lr: 1e-4
     weight_decay: 1e-4
@@ -84,7 +84,7 @@ training:
 
   # Evaluation during training
   val_episodes: 200
-  val_every_n_epochs: 5
+  val_every_n_epochs: 10
 
   # Checkpointing
   checkpoint_dir: "checkpoints/"
@@ -103,3 +103,35 @@ inference:
   text_strategy: "class_anchors"  # "class_anchors" | "vis2sem" | "visual_only"
   num_eval_episodes: 600
   confidence_interval: 0.95
+
+# Multi-label binary decomposition settings
+# Enable with: multilabel.enabled=true
+multilabel:
+  enabled: false  # Set to true to use multi-label mode with binary decomposition
+
+  # Binary episode configuration
+  n_labels: 5      # Number of labels per episode (L)
+  k_pos: 3         # Positive support examples per label
+  k_neg: 5         # Negative support examples per label
+  q_query: 10      # Query examples per label (balanced pos/neg)
+
+  # Adaptive anchor blending for positive prototypes
+  # Weights are adaptive based on number of positive samples:
+  #   >20 samples: α=0.3 (trust visual prototype)
+  #   10-20 samples: α=0.5 (balanced)
+  #   5-10 samples: α=0.7 (rely on semantic anchor)
+  #   <5 samples: α=0.9 (almost pure semantic anchor)
+  anchor_weight_adaptive: true
+
+  # Loss configuration
+  use_focal_loss: true    # Focal loss handles extreme label imbalance
+  focal_gamma: 2.0        # Focusing parameter (higher = more focus on hard examples)
+  focal_alpha: 0.25       # Balance parameter for positive/negative
+  lambda_margin: 0.1      # Weight for prototype margin loss
+
+  # Evaluation threshold
+  threshold: 0.5          # Sigmoid threshold for binary predictions
+
+  # Sampling constraints
+  min_positives: 3        # Minimum positive samples to include a label in episodes
+  min_negatives: 10       # Minimum negative samples

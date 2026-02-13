@@ -1,0 +1,22 @@
+{
+  "mean_accuracy": 0.2675833393012484,
+  "ci_95": 0.006117348048198727,
+  "per_class_acc": {
+    "0": 0.274375,
+    "1": 0.260625,
+    "2": 0.2627083333333333,
+    "3": 0.265625,
+    "4": 0.27458333333333335
+  }
+}
+python scripts/train.py \                                                                                                                                                          
+    --config configs/default.yaml \ multilabel.enabled=true \ 
+    training.phase2.num_epochs=40 \                                                                                                                                                                               
+    training.val_every_n_epochs=5 \                                                                                                                                                                               
+    training.save_every_n_epochs=10  
+
+python scripts/train.py \
+    --config configs/default.yaml \ multilabel.enabled=true \
+    training.phase2.num_epochs=40 \
+    training.val_every_n_epochs=5 \
+    training.save_every_n_epochs=10

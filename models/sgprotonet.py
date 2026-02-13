@@ -12,7 +12,12 @@ from models.semantic_encoder import SemanticEncoder
 from models.projections import VisualProjection, SemanticProjection
 from models.sgam import SGAM
 from models.fusion import GatedFusion
-from models.prototypes import PrototypeComputation, compute_distances
+from models.prototypes import (
+    PrototypeComputation,
+    DualPrototypeComputation,
+    compute_distances,
+    compute_binary_logits,
+)
 from models.vis2sem import Vis2Sem
 
 
@@ -51,8 +56,16 @@ class SGProtoNet(nn.Module):
             dropout=model_cfg.fusion.dropout,
         )
 
-        # Prototype computation
+        # Prototype computation (single-label mode)
         self.prototype = PrototypeComputation(mode=model_cfg.prototype_mode)
+
+        # Dual prototype computation (multi-label binary decomposition mode)
+        multilabel_cfg = cfg.get("multilabel", {})
+        self.dual_prototype = DualPrototypeComputation(
+            mode=model_cfg.prototype_mode,
+            use_adaptive_anchor=multilabel_cfg.get("anchor_weight_adaptive", True),
+            fixed_anchor_weight=0.3,  # Fallback if not adaptive
+        )
 
         # Vis2Sem for text-free inference
         self.vis2sem = Vis2Sem(
@@ -181,6 +194,91 @@ class SGProtoNet(nn.Module):
             "support_out": support_out,
             "query_out": query_out,
             "prototypes": prototypes,
+        }
+
+    def forward_binary_episode(
+        self,
+        support_pos_images: torch.Tensor,
+        support_pos_texts: list[str] | None,
+        support_neg_images: torch.Tensor,
+        support_neg_texts: list[str] | None,
+        query_images: torch.Tensor,
+        query_texts: list[str] | None,
+        n_labels: int,
+        k_pos: int,
+        k_neg: int,
+        class_semantic_embeds: torch.Tensor | None = None,
+        text_strategy: str = "class_anchors",
+        label_sample_counts: list[int] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        """Forward pass for binary decomposition episode (multi-label).
+
+        Args:
+            support_pos_images: (n_labels * k_pos, 3, H, W) positive support images.
+            support_pos_texts: List of positive support report strings, or None.
+            support_neg_images: (n_labels * k_neg, 3, H, W) negative support images.
+            support_neg_texts: List of negative support report strings, or None.
+            query_images: (n_query, 3, H, W) query images.
+            query_texts: List of query report strings, or None.
+            n_labels: Number of labels in this episode.
+            k_pos: Positive support examples per label.
+            k_neg: Negative support examples per label.
+            class_semantic_embeds: Optional class anchor embeddings (n_labels, d_model).
+            text_strategy: How to handle text at inference.
+            label_sample_counts: Optional list of total positive sample counts per label
+                (used for adaptive anchor weighting).
+
+        Returns:
+            Dict with keys: binary_logits, support_pos_out, support_neg_out,
+            query_out, prototypes_pos, prototypes_neg.
+        """
+        # Encode positive support set
+        pos_anchors = None
+        if class_semantic_embeds is not None and support_pos_texts is None:
+            # Expand anchors to match support set size
+            pos_anchors = class_semantic_embeds.repeat_interleave(k_pos, dim=0)
+
+        support_pos_out = self.encode_multimodal(
+            support_pos_images, support_pos_texts, text_strategy, pos_anchors
+        )
+
+        # Encode negative support set (use visual-only, no semantic guidance for negatives)
+        support_neg_out = self.encode_multimodal(
+            support_neg_images, support_neg_texts, "visual_only", None
+        )
+
+        # Compute dual prototypes
+        prototypes_pos, prototypes_neg = self.dual_prototype(
+            support_pos_out["f_final"],
+            support_neg_out["f_final"],
+            n_labels,
+            k_pos,
+            k_neg,
+            class_semantic_embeds,
+            label_sample_counts,
+        )
+
+        # Encode query set (use vis2sem or visual_only since we don't know true labels)
+        query_strategy = "vis2sem" if text_strategy == "class_anchors" else text_strategy
+        query_out = self.encode_multimodal(
+            query_images, query_texts, query_strategy, None
+        )
+
+        # Compute binary logits
+        binary_logits = compute_binary_logits(
+            query_out["f_final"],
+            prototypes_pos,
+            prototypes_neg,
+            self.distance,
+        )
+
+        return {
+            "binary_logits": binary_logits,
+            "support_pos_out": support_pos_out,
+            "support_neg_out": support_neg_out,
+            "query_out": query_out,
+            "prototypes_pos": prototypes_pos,
+            "prototypes_neg": prototypes_neg,
         }
 
     def forward(
