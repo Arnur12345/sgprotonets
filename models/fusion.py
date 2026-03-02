@@ -58,3 +58,4 @@ class GatedFusion(nn.Module):
         combined = torch.cat([v_cls_proj, fused], dim=-1)  # (B, 2*d_model)
         f_final = self.final_mlp(combined)  # (B, d_model)
         return f_final
+
