@@ -153,7 +153,11 @@ def main() -> None:
         }
 
     # Save results to JSON
-    out_path = Path(args.checkpoint).parent / f"eval_{args.split}_multilabel.json" if is_multilabel else Path(args.checkpoint).parent / f"eval_{args.split}.json"
+    out_path = (
+        Path(args.checkpoint).parent / f"eval_{args.split}_multilabel.json"
+        if is_multilabel
+        else Path(args.checkpoint).parent / f"eval_{args.split}.json"
+    )
     with open(out_path, "w") as f:
         json.dump(save_results, f, indent=2)
     print(f"\nResults saved to {out_path}")

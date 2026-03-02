@@ -42,6 +42,7 @@ class EpisodeSampler(Sampler[List[int]]):
         self.q_query = q_query
         self.num_episodes = num_episodes
         self.seed = seed
+        self._epoch = 0
 
         # Validate that each class has enough samples
         for cls_idx, indices in self.class_indices.items():
@@ -58,7 +59,8 @@ class EpisodeSampler(Sampler[List[int]]):
             [support_cls0_0, ..., support_cls0_K, ..., support_clsN_K,
              query_cls0_0, ..., query_cls0_Q, ..., query_clsN_Q]
         """
-        rng = random.Random(self.seed)
+        rng = random.Random(self.seed + self._epoch)
+        self._epoch += 1
         class_pool = list(self.class_indices.keys())
 
         for _ in range(self.num_episodes):
@@ -172,6 +174,7 @@ class BinaryEpisodeSampler(Sampler[Dict]):
         self.q_query = q_query
         self.num_episodes = num_episodes
         self.seed = seed
+        self._epoch = 0
 
         # Filter to labels with sufficient samples for support + query
         n_pos_query = q_query // 2
@@ -203,7 +206,8 @@ class BinaryEpisodeSampler(Sampler[Dict]):
             - episode_labels: Which global label indices are in this episode
             - n_labels, k_pos, k_neg, q_query: Episode structure params
         """
-        rng = random.Random(self.seed)
+        rng = random.Random(self.seed + self._epoch)
+        self._epoch += 1
 
         for _ in range(self.num_episodes):
             # Sample L labels for this episode

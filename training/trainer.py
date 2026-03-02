@@ -100,12 +100,27 @@ class Trainer:
         p1_cfg = self.cfg.training.phase1
 
         # Build dataset and dataloader
-        dataset = IUXRayDataset(
-            data_dir=self.cfg.data.data_dir,
-            split_classes=list(self.cfg.data.train_classes),
-            image_size=self.cfg.data.image_size,
-            is_train=True,
-        )
+        # Use multi-label dataset when multilabel mode is enabled (handles 'labels' column)
+        if self.cfg.get("multilabel", {}).get("enabled", False):
+            dataset = IUXRayMultiLabelDataset(
+                data_dir=self.cfg.data.data_dir,
+                split_classes=list(self.cfg.data.train_classes),
+                image_size=self.cfg.data.image_size,
+                is_train=True,
+            )
+        else:
+            dataset = IUXRayDataset(
+                data_dir=self.cfg.data.data_dir,
+                split_classes=list(self.cfg.data.train_classes),
+                image_size=self.cfg.data.image_size,
+                is_train=True,
+            )
+        def phase1_collate_fn(batch_list):
+            """Collate that handles variable-length label_list from multi-label dataset."""
+            images = torch.stack([b["image"] for b in batch_list])
+            reports = [b["report"] for b in batch_list]
+            return {"image": images, "report": reports}
+
         dataloader = DataLoader(
             dataset,
             batch_size=p1_cfg.batch_size,
@@ -113,6 +128,7 @@ class Trainer:
             num_workers=4,
             pin_memory=True,
             drop_last=True,
+            collate_fn=phase1_collate_fn if self.cfg.get("multilabel", {}).get("enabled", False) else None,
         )
 
         optimizer = self._build_optimizer(phase=1)

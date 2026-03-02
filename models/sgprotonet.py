@@ -64,7 +64,7 @@ class SGProtoNet(nn.Module):
         self.dual_prototype = DualPrototypeComputation(
             mode=model_cfg.prototype_mode,
             use_adaptive_anchor=multilabel_cfg.get("anchor_weight_adaptive", True),
-            fixed_anchor_weight=0.3,  # Fallback if not adaptive
+            fixed_anchor_weight=multilabel_cfg.get("fixed_anchor_weight", 0.0),
         )
 
         # Vis2Sem for text-free inference

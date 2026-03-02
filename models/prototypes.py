@@ -224,8 +224,8 @@ class DualPrototypeComputation(nn.Module):
         # Negative prototypes: always simple mean (no semantic guidance)
         prototypes_neg = neg_reshaped.mean(dim=1)  # (n_labels, d_model)
 
-        # Apply adaptive anchor blending for positive prototypes
-        if class_semantics is not None:
+        # Apply anchor blending for positive prototypes (skip if fully disabled)
+        if class_semantics is not None and (self.use_adaptive_anchor or self.fixed_anchor_weight > 0):
             prototypes_pos = self._apply_anchor_blending(
                 prototypes_pos, class_semantics, label_sample_counts
             )
