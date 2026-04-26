@@ -174,13 +174,16 @@ class SGProtoNet(nn.Module):
         )  # (n_way, d_model)
 
         # Encode query set
-        query_anchors = None
-        if class_semantic_embeds is not None and query_texts is None:
-            # For queries, we don't know the class — use vis2sem or visual_only
-            query_anchors = None
-
+        # We don't know query labels, so we can't assign class anchors.
+        # Use vis2sem to generate pseudo-semantic embeddings from visual features,
+        # keeping queries in the same fused space as support prototypes.
+        query_strategy = (
+            "vis2sem"
+            if text_strategy == "class_anchors" and query_texts is None
+            else text_strategy
+        )
         query_out = self.encode_multimodal(
-            query_images, query_texts, text_strategy, query_anchors
+            query_images, query_texts, query_strategy, None
         )
 
         # Compute distances and logits

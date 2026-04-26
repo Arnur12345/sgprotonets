@@ -68,13 +68,16 @@ training:
     weight_decay: 1e-4
 
   # Phase 2: Episodic Meta-Training
+  # Privileged-text formulation: reports drive auxiliary losses only;
+  # they never enter the prototype path. See training/episode_loop.py.
   phase2:
     num_epochs: 40
     episodes_per_epoch: 250
     lr: 1e-4
     weight_decay: 1e-4
-    lambda_align: 0.5
-    lambda_consist: 0.1
+    lambda_align: 0.5      # InfoNCE between v_cls_proj and report embedding
+    lambda_vis2sem: 0.5    # MSE between vis2sem(v_cls_proj) and report embedding
+    lambda_consist: 0.0    # disabled — f_final and v_cls_proj are meant to differ
 
   optimizer: "adamw"
   scheduler:

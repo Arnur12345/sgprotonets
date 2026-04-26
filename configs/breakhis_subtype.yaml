@@ -1,0 +1,138 @@
+# BreakHis 8-class subtype experiment config.
+# Merges on top of default.yaml — only overrides what differs.
+#
+# Subtype class split (5 train / 3 val):
+#   Train — adenosis, fibroadenoma, ductal_carcinoma,
+#            lobular_carcinoma, mucinous_carcinoma
+#   Val   — phyllodes_tumor, tubular_adenoma, papillary_carcinoma
+#
+# The validation set has 3 classes so the framework auto-adapts n_way
+# to min(episode.n_way, len(val_classes)) = 3 during validation.
+#
+# Usage:
+#   python scripts/train_breakhis.py --config configs/breakhis_subtype.yaml
+#
+# Cross-magnification (train 40X → test 400X):
+#   python scripts/train_breakhis.py --config configs/breakhis_subtype.yaml \
+#       data.train_magnifications=[40X] data.val_magnifications=[400X]
+#
+# VLM-report ablation:
+#   python scripts/train_breakhis.py --config configs/breakhis_subtype.yaml \
+#       data.reports_csv=data/reports/llava_med_reports.csv
+
+seed: 42
+
+# ── Dataset ──────────────────────────────────────────────────────────────────
+data:
+  dataset: "breakhis"
+  label_mode: "subtype"
+  data_dir: "data/breakhis/BreaKHis_v1/BreaKHis_v1/"
+  image_size: 224
+
+  # 5 train / 3 val — balanced across benign and malignant subtypes.
+  # Train: 2 benign (adenosis, fibroadenoma) + 3 malignant (DC, LC, MC)
+  # Val:   2 benign (PT, TA) + 1 malignant (PC)
+  train_classes:
+    - "adenosis"
+    - "fibroadenoma"
+    - "ductal_carcinoma"
+    - "lobular_carcinoma"
+    - "mucinous_carcinoma"
+  val_classes:
+    - "phyllodes_tumor"
+    - "tubular_adenoma"
+    - "papillary_carcinoma"
+  test_classes: []   # Held-out; use val for reporting
+
+  # Magnification filter (null = all four).
+  # Override for cross-magnification experiments:
+  #   data.train_magnifications=[40X] data.val_magnifications=[400X]
+  train_magnifications: ["100X"]
+  val_magnifications:   ["100X"]
+  test_magnifications:  null
+
+  # Optional path to VLM-generated reports CSV.
+  # null → class_anchors strategy is used (no per-image text needed).
+  reports_csv: "data/reports/medgemma_reports.csv"
+
+# ── Few-shot episode ──────────────────────────────────────────────────────────
+episode:
+  n_way: 3     # 3-way from 5 train classes (more episode diversity)
+  k_shot: 5    # 5-shot is standard for BreakHis comparisons
+  q_query: 8
+
+# ── Model ────────────────────────────────────────────────────────────────────
+model:
+  d_model: 192
+
+  visual_encoder:
+    name: "google/vit-base-patch16-224-in21k"
+    type: "hf"
+    freeze: true
+    unfreeze_last_n_blocks: 0
+
+  semantic_encoder:
+    name: "bert-base-uncased"
+    type: "hf"
+    freeze: true
+    unfreeze_last_n_blocks: 0
+    max_length: 256
+
+  sgam:
+    num_heads: 4
+    dropout: 0.1
+
+  fusion:
+    dropout: 0.1
+
+  vis2sem:
+    d_hidden: 512
+
+  distance: "cosine"
+  prototype_mode: "semantic_weighted"
+
+# ── Training ─────────────────────────────────────────────────────────────────
+training:
+  use_amp: true
+
+  phase1:
+    enabled: true
+    num_epochs: 15
+    batch_size: 32
+    lr: 1e-4
+    weight_decay: 1e-4
+
+  phase2:
+    num_epochs: 40
+    episodes_per_epoch: 300
+    lr: 5e-5
+    weight_decay: 1e-4
+    lambda_align: 0.5
+    lambda_vis2sem: 0.5
+    lambda_consist: 0.0
+
+  optimizer: "adamw"
+  scheduler:
+    name: "cosine"
+    warmup_epochs: 5
+    min_lr: 1e-6
+
+  val_episodes: 200
+  val_every_n_epochs: 2
+
+  checkpoint_dir: "checkpoints/breakhis_subtype/"
+  save_best: true
+  save_every_n_epochs: 10
+
+# ── Inference ────────────────────────────────────────────────────────────────
+inference:
+  text_strategy: "class_anchors"  # "class_anchors" | "vis2sem" | "visual_only"
+  num_eval_episodes: 600
+  confidence_interval: 0.95
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging:
+  use_wandb: false
+  wandb_project: "sgprotonet-breakhis"
+  wandb_entity: null
+  log_every_n_steps: 10

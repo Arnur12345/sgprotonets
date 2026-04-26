@@ -1,6 +1,7 @@
 """Main training loop (two-phase)."""
 
 import logging
+import random
 from pathlib import Path
 
 import torch
@@ -18,6 +19,11 @@ from data.episode_sampler import (
     binary_episode_collate_fn,
 )
 from data.class_descriptions import CLASS_DESCRIPTIONS
+from data.class_descriptions_breakhis import (
+    CLASS_DESCRIPTIONS_BREAKHIS,
+    MAGNIFICATION_DESCRIPTIONS,
+    get_magnification_tier,
+)
 from models.sgprotonet import SGProtoNet
 from training.losses import alignment_loss, vis2sem_loss
 from training.episode_loop import episode_step, binary_episode_step
@@ -63,6 +69,62 @@ class Trainer:
 
         self.best_val_metric = 0.0
 
+    # ------------------------------------------------------------------
+    # Dataset factory
+    # ------------------------------------------------------------------
+
+    def _is_breakhis(self) -> bool:
+        return self.cfg.data.get("dataset", "iu_xray") == "breakhis"
+
+    def _build_dataset(self, split: str, is_train: bool):
+        """Build dataset for the given split ('train', 'val', 'test').
+
+        Dispatches to BreakHisDataset or IUXRayDataset based on cfg.data.dataset.
+        """
+        dcfg = self.cfg.data
+        split_classes = list(dcfg[f"{split}_classes"])
+
+        if self._is_breakhis():
+            from data.breakhis import BreakHisDataset
+            mag_key = f"{split}_magnifications"
+            magnifications = dcfg.get(mag_key, None)
+            if magnifications is not None:
+                magnifications = list(magnifications)
+            return BreakHisDataset(
+                data_dir=dcfg.data_dir,
+                split_classes=split_classes,
+                label_mode=dcfg.get("label_mode", "subtype"),
+                magnifications=magnifications,
+                reports_csv=dcfg.get("reports_csv", None),
+                image_size=dcfg.image_size,
+                is_train=is_train,
+            )
+
+        # Default: IU X-Ray
+        return IUXRayDataset(
+            data_dir=dcfg.data_dir,
+            split_classes=split_classes,
+            image_size=dcfg.image_size,
+            is_train=is_train,
+        )
+
+    def _build_multilabel_dataset(self, split: str, is_train: bool):
+        """Build multi-label dataset (IU X-Ray only for now)."""
+        dcfg = self.cfg.data
+        split_classes = list(dcfg[f"{split}_classes"])
+        return IUXRayMultiLabelDataset(
+            data_dir=dcfg.data_dir,
+            split_classes=split_classes,
+            image_size=dcfg.image_size,
+            is_train=is_train,
+        )
+
+    def _get_class_descriptions(self) -> dict[str, str]:
+        """Return the class descriptions dict for the current dataset."""
+        if self._is_breakhis():
+            return CLASS_DESCRIPTIONS_BREAKHIS
+        return CLASS_DESCRIPTIONS
+
     def _build_optimizer(self, phase: int) -> optim.Optimizer:
         """Build optimizer for trainable parameters only."""
         if phase == 1:
@@ -84,11 +146,40 @@ class Trainer:
         Returns:
             Tensor of shape (n_classes, d_model).
         """
-        descriptions = [CLASS_DESCRIPTIONS.get(c, "") for c in classes]
+        desc_lookup = self._get_class_descriptions()
+        descriptions = [desc_lookup.get(c, "") for c in classes]
         with torch.no_grad():
             s_cls, _ = self.model.semantic_encoder(descriptions, self.device)
             anchors = self.model.semantic_proj(s_cls)
         return anchors
+
+    def _get_mag_class_anchors(self, classes: list[str]) -> dict[str, torch.Tensor]:
+        """Encode magnification-aware class descriptions as semantic anchors.
+
+        Pre-computes anchors for each (class, mag_tier) combination.
+
+        Args:
+            classes: List of class names.
+
+        Returns:
+            Dict mapping mag_tier ('low'/'high') to Tensor (n_classes, d_model).
+        """
+        if not self._is_breakhis():
+            # Non-BreakHis datasets don't have magnification tiers
+            anchors = self._get_class_anchors(classes)
+            return {"low": anchors, "high": anchors}
+
+        result = {}
+        for tier in ("low", "high"):
+            descriptions = []
+            for c in classes:
+                mag_desc = MAGNIFICATION_DESCRIPTIONS.get(c, {})
+                desc = mag_desc.get(tier, CLASS_DESCRIPTIONS_BREAKHIS.get(c, ""))
+                descriptions.append(desc)
+            with torch.no_grad():
+                s_cls, _ = self.model.semantic_encoder(descriptions, self.device)
+                result[tier] = self.model.semantic_proj(s_cls)
+        return result
 
     def train_phase1(self) -> None:
         """Phase 1: Modality alignment training (non-episodic)."""
@@ -100,21 +191,10 @@ class Trainer:
         p1_cfg = self.cfg.training.phase1
 
         # Build dataset and dataloader
-        # Use multi-label dataset when multilabel mode is enabled (handles 'labels' column)
         if self.cfg.get("multilabel", {}).get("enabled", False):
-            dataset = IUXRayMultiLabelDataset(
-                data_dir=self.cfg.data.data_dir,
-                split_classes=list(self.cfg.data.train_classes),
-                image_size=self.cfg.data.image_size,
-                is_train=True,
-            )
+            dataset = self._build_multilabel_dataset("train", is_train=True)
         else:
-            dataset = IUXRayDataset(
-                data_dir=self.cfg.data.data_dir,
-                split_classes=list(self.cfg.data.train_classes),
-                image_size=self.cfg.data.image_size,
-                is_train=True,
-            )
+            dataset = self._build_dataset("train", is_train=True)
         def phase1_collate_fn(batch_list):
             """Collate that handles variable-length label_list from multi-label dataset."""
             images = torch.stack([b["image"] for b in batch_list])
@@ -176,12 +256,7 @@ class Trainer:
         ep_cfg = self.cfg.episode
 
         # Build training dataset and sampler
-        train_dataset = IUXRayDataset(
-            data_dir=self.cfg.data.data_dir,
-            split_classes=list(self.cfg.data.train_classes),
-            image_size=self.cfg.data.image_size,
-            is_train=True,
-        )
+        train_dataset = self._build_dataset("train", is_train=True)
         train_sampler = EpisodeSampler(
             dataset=train_dataset,
             n_way=ep_cfg.n_way,
@@ -198,18 +273,16 @@ class Trainer:
         )
 
         # Validation dataset
-        val_dataset = IUXRayDataset(
-            data_dir=self.cfg.data.data_dir,
-            split_classes=list(self.cfg.data.val_classes),
-            image_size=self.cfg.data.image_size,
-            is_train=False,
-        )
+        val_dataset = self._build_dataset("val", is_train=False)
 
         optimizer = self._build_optimizer(phase=2)
         scheduler = build_scheduler(optimizer, self.cfg.training.scheduler, p2_cfg.num_epochs)
 
         # Pre-compute class anchors for train classes
+        # Generic (non-magnification-aware) anchors
         class_anchors = self._get_class_anchors(train_dataset.classes)
+        # Magnification-aware anchors: dict[tier] -> (n_classes, d_model)
+        mag_anchors = self._get_mag_class_anchors(train_dataset.classes)
 
         for epoch in range(p2_cfg.num_epochs):
             self.model.train()
@@ -227,9 +300,30 @@ class Trainer:
                 support_labels = support["label"].to(self.device)
                 query_labels = query_labels.to(self.device)
 
-                # Use per-image text when available
-                support_texts = support["report"]
-                query_texts = query["report"]
+                # Privileged-text formulation: pass per-image reports to
+                # episode_step so they can drive the alignment + vis2sem
+                # auxiliary losses, but episode_step itself will NEVER let
+                # them reach forward_episode / the prototypes / the logits.
+                # See training/episode_loop.py for details.
+                support_texts = support["report"] if support.get("report") is not None else None
+                query_texts = None  # never used at the prototype path
+
+                # Get episode-specific class anchors.
+                # The original (global) labels before remapping are in the batch.
+                # Support is ordered: k_shot of class_0, k_shot of class_1, ...
+                # so we take every k_shot-th label to get the n_way global indices.
+                orig_labels = batch["label"][:ep_cfg.n_way * ep_cfg.k_shot]
+                episode_class_indices = orig_labels[::ep_cfg.k_shot].tolist()
+
+                # Use magnification-aware anchors when available.
+                # Pick the dominant magnification tier in the episode.
+                if "magnification" in support:
+                    mags = support["magnification"]
+                    n_low = sum(1 for m in mags if m in ("40X", "100X"))
+                    tier = "low" if n_low > len(mags) // 2 else "high"
+                    episode_anchors = mag_anchors[tier][episode_class_indices]
+                else:
+                    episode_anchors = class_anchors[episode_class_indices]
 
                 optimizer.zero_grad()
 
@@ -245,7 +339,8 @@ class Trainer:
                         n_way=ep_cfg.n_way,
                         lambda_align=p2_cfg.lambda_align,
                         lambda_consist=p2_cfg.lambda_consist,
-                        class_semantic_embeds=class_anchors,
+                        lambda_vis2sem=p2_cfg.get("lambda_vis2sem", 0.5),
+                        class_semantic_embeds=episode_anchors,
                     )
 
                 self.scaler.scale(result["loss"]).backward()
@@ -289,7 +384,7 @@ class Trainer:
                 self._save_checkpoint(f"epoch_{epoch+1}.pt", epoch, avg_acc)
 
     @torch.no_grad()
-    def _validate(self, val_dataset: IUXRayDataset) -> float:
+    def _validate(self, val_dataset) -> float:
         """Run validation episodes.
 
         Args:
@@ -320,6 +415,7 @@ class Trainer:
         )
 
         class_anchors = self._get_class_anchors(val_dataset.classes)
+        mag_anchors = self._get_mag_class_anchors(val_dataset.classes)
 
         total_acc = 0.0
         n_episodes = 0
@@ -334,15 +430,27 @@ class Trainer:
             support_labels = support["label"].to(self.device)
             query_labels = query_labels.to(self.device)
 
+            # Select magnification-aware anchors for this episode
+            if "magnification" in support:
+                mags = support["magnification"]
+                n_low = sum(1 for m in mags if m in ("40X", "100X"))
+                tier = "low" if n_low > len(mags) // 2 else "high"
+                ep_anchors = mag_anchors[tier]
+            else:
+                ep_anchors = class_anchors
+
             with torch.cuda.amp.autocast(enabled=self.use_amp):
+                # Use class anchors only at validation (no per-image reports)
+                # to prevent text from leaking class identity on novel subtypes
                 episode_out = self.model.forward_episode(
                     support_images=support_images,
-                    support_texts=support["report"],
+                    support_texts=None,
                     support_labels=support_labels,
                     query_images=query_images,
-                    query_texts=query["report"],
+                    query_texts=None,
                     n_way=val_n_way,
-                    class_semantic_embeds=class_anchors,
+                    class_semantic_embeds=ep_anchors,
+                    text_strategy="class_anchors",
                 )
 
             preds = episode_out["logits"].argmax(dim=-1)
@@ -359,22 +467,12 @@ class Trainer:
         ml_cfg = self.cfg.multilabel
 
         # Build multi-label training dataset
-        train_dataset = IUXRayMultiLabelDataset(
-            data_dir=self.cfg.data.data_dir,
-            split_classes=list(self.cfg.data.train_classes),
-            image_size=self.cfg.data.image_size,
-            is_train=True,
-        )
+        train_dataset = self._build_multilabel_dataset("train", is_train=True)
 
         # Build multi-label validation dataset (on val_classes, NOT train_classes)
         val_classes = list(self.cfg.data.val_classes)
         if val_classes:
-            val_dataset = IUXRayMultiLabelDataset(
-                data_dir=self.cfg.data.data_dir,
-                split_classes=val_classes,
-                image_size=self.cfg.data.image_size,
-                is_train=False,
-            )
+            val_dataset = self._build_multilabel_dataset("val", is_train=False)
             logger.info(f"Validation dataset: {len(val_dataset)} samples, "
                         f"{val_dataset.num_classes} classes: {val_dataset.classes}")
         else:
@@ -468,20 +566,23 @@ class Trainer:
                 optimizer.zero_grad()
 
                 with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    # Reports passed for auxiliary supervision only; they
+                    # do NOT reach forward_binary_episode or the prototypes.
                     result = binary_episode_step(
                         model=self.model,
                         support_pos_images=support_pos_images,
                         support_pos_texts=support_pos["report"],
                         support_neg_images=support_neg_images,
-                        support_neg_texts=support_neg["report"],
+                        support_neg_texts=None,
                         query_images=query_images,
-                        query_texts=query["report"],
+                        query_texts=None,
                         query_labels=query_labels,
                         n_labels=n_labels,
                         k_pos=k_pos,
                         k_neg=k_neg,
                         lambda_align=p2_cfg.lambda_align,
                         lambda_consist=p2_cfg.lambda_consist,
+                        lambda_vis2sem=p2_cfg.get("lambda_vis2sem", 0.5),
                         lambda_margin=ml_cfg.get("lambda_margin", 0.1),
                         class_semantic_embeds=episode_anchors,
                         use_focal_loss=ml_cfg.get("use_focal_loss", True),
@@ -541,7 +642,7 @@ class Trainer:
                 self._save_checkpoint(f"epoch_{epoch+1}.pt", epoch, avg_f1)
 
     @torch.no_grad()
-    def _validate_multilabel(self, val_dataset: IUXRayMultiLabelDataset) -> dict:
+    def _validate_multilabel(self, val_dataset) -> dict:
         """Run validation episodes for multi-label.
 
         Args:
@@ -603,18 +704,20 @@ class Trainer:
             episode_sample_counts = [all_sample_counts[l] for l in episode_labels]
 
             with torch.cuda.amp.autocast(enabled=self.use_amp):
+                # Privileged-text: reports never enter forward_binary_episode.
                 episode_out = self.model.forward_binary_episode(
                     support_pos_images=support_pos_images,
-                    support_pos_texts=support_pos["report"],
+                    support_pos_texts=None,
                     support_neg_images=support_neg_images,
-                    support_neg_texts=support_neg["report"],
+                    support_neg_texts=None,
                     query_images=query_images,
-                    query_texts=query["report"],
+                    query_texts=None,
                     n_labels=n_labels,
                     k_pos=k_pos,
                     k_neg=k_neg,
                     class_semantic_embeds=episode_anchors,
                     label_sample_counts=episode_sample_counts,
+                    text_strategy="class_anchors",
                 )
 
             logits = episode_out["binary_logits"]

@@ -1,0 +1,115 @@
+# BreakHis Binary (benign vs malignant) experiment config.
+# Merges on top of default.yaml — only overrides what differs.
+#
+# Usage:
+#   python scripts/train_breakhis.py --config configs/breakhis_binary.yaml
+#
+# Cross-magnification (train 40X → test 400X):
+#   python scripts/train_breakhis.py --config configs/breakhis_binary.yaml \
+#       data.train_magnifications=[40X] data.val_magnifications=[400X]
+#
+# VLM-report ablation (pass reports CSV):
+#   python scripts/train_breakhis.py --config configs/breakhis_binary.yaml \
+#       data.reports_csv=data/reports/llava_med_reports.csv
+
+seed: 42
+
+# ── Dataset ──────────────────────────────────────────────────────────────────
+data:
+  dataset: "breakhis"
+  label_mode: "binary"
+  data_dir: "data/breakhis/BreaKHis_v1/BreaKHis_v1/"
+  image_size: 224
+
+  # Binary has only 2 classes; all episodes use both.
+  # Splitting is effectively by episode (random patient sampling), not by class.
+  train_classes: ["benign", "malignant"]
+  val_classes:   ["benign", "malignant"]
+  test_classes:  ["benign", "malignant"]
+
+  # Magnification filter (null = all four).
+  # Override per split for cross-magnification experiments:
+  #   data.train_magnifications=[40X] data.val_magnifications=[400X]
+  train_magnifications: null   # ["40X"] | ["100X"] | ["200X"] | ["400X"] | null
+  val_magnifications:   null
+  test_magnifications:  null
+
+  # Optional path to VLM-generated reports CSV (from generate_breakhis_reports.py).
+  # null → class_anchors strategy is used for every image.
+  reports_csv: null
+
+# ── Few-shot episode ──────────────────────────────────────────────────────────
+episode:
+  n_way: 2       # Binary: exactly 2 classes per episode
+  k_shot: 5      # 5-shot binary is a natural baseline
+  q_query: 10    # Enough query samples for stable accuracy estimate
+
+# ── Model ────────────────────────────────────────────────────────────────────
+model:
+  d_model: 192
+
+  visual_encoder:
+    name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+    type: "biomedclip"
+    freeze: true
+    unfreeze_last_n_blocks: 2
+
+  semantic_encoder:
+    name: "microsoft/BiomedCLIP-PubMedBERT_256-vit_base_patch16_224"
+    type: "biomedclip"
+    freeze: true
+    unfreeze_last_n_blocks: 0
+    max_length: 256
+
+  sgam:
+    num_heads: 4
+    dropout: 0.1
+
+  distance: "cosine"
+  prototype_mode: "vanilla"
+
+# ── Training ─────────────────────────────────────────────────────────────────
+training:
+  use_amp: true
+
+  phase1:
+    enabled: true
+    num_epochs: 15
+    batch_size: 32
+    lr: 5e-5
+    weight_decay: 1e-4
+
+  phase2:
+    num_epochs: 40
+    episodes_per_epoch: 300
+    lr: 5e-5
+    weight_decay: 1e-4
+    lambda_align: 0.5
+    lambda_vis2sem: 0.5
+    lambda_consist: 0.0
+
+  optimizer: "adamw"
+  scheduler:
+    name: "cosine"
+    warmup_epochs: 5
+    min_lr: 1e-6
+
+  val_episodes: 200
+  val_every_n_epochs: 5
+
+  checkpoint_dir: "checkpoints/breakhis_binary/"
+  save_best: true
+  save_every_n_epochs: 10
+
+# ── Inference ────────────────────────────────────────────────────────────────
+inference:
+  text_strategy: "class_anchors"  # "class_anchors" | "vis2sem" | "visual_only"
+  num_eval_episodes: 600
+  confidence_interval: 0.95
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging:
+  use_wandb: false
+  wandb_project: "sgprotonet-breakhis"
+  wandb_entity: null
+  log_every_n_steps: 10

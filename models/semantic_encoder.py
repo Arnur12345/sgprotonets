@@ -74,10 +74,18 @@ class SemanticEncoder(nn.Module):
             Tokenized inputs dictionary.
         """
         if self._encoder_type == "open_clip":
-            tokens = self.tokenizer(texts)
-            if isinstance(tokens, torch.Tensor):
-                return {"input_ids": tokens.to(device)}
-            return {k: v.to(device) for k, v in tokens.items()}
+            # Bypass open_clip's HFTokenizer.__call__ which uses the
+            # removed batch_encode_plus in transformers>=5.  Tokenize
+            # with the underlying HF tokenizer directly.
+            hf_tok = self.tokenizer.tokenizer
+            encoded = hf_tok(
+                texts,
+                padding="max_length",
+                truncation=True,
+                max_length=self.tokenizer.context_length,
+                return_tensors="pt",
+            )
+            return {k: v.to(device) for k, v in encoded.items()}
         else:
             encoded = self.tokenizer(
                 texts,

@@ -67,8 +67,10 @@ def get_image_transform(image_size: int = 224, is_train: bool = True) -> T.Compo
         return T.Compose([
             T.Resize((image_size, image_size)),
             T.RandomHorizontalFlip(p=0.5),
-            T.RandomRotation(degrees=10),
-            T.ColorJitter(brightness=0.1, contrast=0.1),
+            T.RandomVerticalFlip(p=0.5),
+            T.RandomApply([T.RandomRotation(degrees=180)], p=0.5),
+            T.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+            T.RandomGrayscale(p=0.05),
             T.ToTensor(),
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])

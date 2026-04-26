@@ -13,23 +13,27 @@ Output CSV columns:
     magnification – e.g. "40X"
     patient_id   – slide identifier parsed from filename (e.g. "14-4659")
 
-Usage — GCP A100 (no quantization needed):
+Usage — MedGemma (recommended, RTX 3080 10 GB VRAM):
     python scripts/generate_breakhis_reports.py \\
-        --data_dir /path/to/BreaKHis_v1 \\
-        --output_csv data/reports/llava_med_reports.csv \\
-        --model microsoft/llava-med-v1.5-mistral-7b
-
-Usage — RTX 3080 / 16 GB VRAM (4-bit quantization):
-    python scripts/generate_breakhis_reports.py \\
-        --data_dir /path/to/BreaKHis_v1 \\
-        --output_csv data/reports/llava_med_reports.csv \\
-        --model microsoft/llava-med-v1.5-mistral-7b \\
+        --data_dir data/breakhis/BreaKHis_v1/BreaKHis_v1 \\
+        --output_csv data/reports/breakhis_reports_medgemma.csv \\
+        --model google/medgemma-4b-it \\
         --load_in_4bit
 
-Supported model IDs (LLaVA 1.5 family):
-    microsoft/llava-med-v1.5-mistral-7b   (primary — medical fine-tune)
-    llava-hf/llava-1.5-7b-hf             (general, stronger base)
+Usage — LLaVA-1.5 / LLaVA-Next:
+    python scripts/generate_breakhis_reports.py \\
+        --data_dir /path/to/BreaKHis_v1 \\
+        --output_csv data/reports/llava_reports.csv \\
+        --model llava-hf/llava-1.5-7b-hf \\
+        --load_in_4bit
+
+Supported model IDs:
+    google/medgemma-4b-it                 (recommended — medical Gemma-3)
+    llava-hf/llava-1.5-7b-hf             (general LLaVA baseline)
     llava-hf/llava-v1.6-mistral-7b-hf    (LLaVA-NeXT — use --llava_next flag)
+
+Note: MedGemma is a gated model. Run `huggingface-cli login` and accept
+terms at https://huggingface.co/google/medgemma-4b-it before use.
 """
 
 from __future__ import annotations
@@ -47,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch
 from PIL import Image
 from tqdm import tqdm
-from transformers import AutoProcessor, LlavaForConditionalGeneration
+from transformers import AutoProcessor, LlavaForConditionalGeneration, LlavaProcessor
 
 from data.breakhis import VALID_MAGNIFICATIONS, parse_breakhis_filename
 
@@ -60,60 +64,79 @@ logger = logging.getLogger(__name__)
 CSV_COLUMNS = ["image_path", "report", "subtype", "magnification", "patient_id"]
 
 # ---------------------------------------------------------------------------
-# Magnification-aware prompts
+# Prompts
 # ---------------------------------------------------------------------------
 
-# Three prompt variants reflecting what is visually meaningful at each scale:
-#   40X  — tissue architecture and glandular organisation
-#   100X / 200X — cellular arrangement and early nuclear features
-#   400X — individual cell / nuclear detail and mitotic activity
-_PROMPTS: dict[str, str] = {
-    "40X": (
-        "This is an H&E stained breast biopsy image acquired at 40X magnification. "
-        "Describe the tissue architecture, glandular patterns, epithelial-to-stromal "
-        "ratio, and any overall structural abnormalities you can observe. "
-        "Provide a concise 3-4 sentence pathological description."
-    ),
-    "100X": (
-        "This is an H&E stained breast biopsy image acquired at 100X magnification. "
-        "Describe the cellular arrangement, duct morphology, nuclear-to-cytoplasmic "
-        "ratio, and any early signs of cellular atypia. "
-        "Provide a concise 3-4 sentence pathological description."
-    ),
-    "200X": (
-        "This is an H&E stained breast biopsy image acquired at 200X magnification. "
-        "Describe the cellular arrangement, nuclear characteristics, degree of atypia, "
-        "and stromal features visible at this magnification. "
-        "Provide a concise 3-4 sentence pathological description."
-    ),
-    "400X": (
-        "This is an H&E stained breast biopsy image acquired at 400X magnification. "
-        "Describe individual cell and nuclear morphology, chromatin pattern, "
-        "nucleolar prominence, mitotic figures if present, and degree of nuclear "
-        "pleomorphism. Provide a concise 3-4 sentence pathological description."
-    ),
-}
+# Single unified prompt template. Magnification is context, but the
+# requested features are the SAME at every scale — this ensures reports
+# for the same class cluster in BiomedCLIP's semantic space regardless of
+# magnification.  Output-format constraints (no markdown, no intro, strict
+# sentence count) prevent the preamble / repetition issues seen with the
+# per-magnification prompts.
+
+_PROMPT_TEMPLATE = (
+    "You are a breast pathologist writing a concise microscopy report. "
+    "This is an H&E stained breast biopsy image at {mag} magnification. "
+    "Describe what you observe: tissue architecture, cellular morphology, "
+    "nuclear features (size, shape, chromatin, nucleoli), stromal characteristics, "
+    "and any signs of atypia or malignancy. "
+    "Write exactly 3-4 sentences. "
+    "Start directly with the pathological findings. "
+    "Do not use markdown, bullet points, bold text, or section headers. "
+    "Do not repeat yourself."
+)
+
+
+def get_prompt(magnification: str) -> str:
+    return _PROMPT_TEMPLATE.format(mag=magnification)
 
 
 # ---------------------------------------------------------------------------
 # Model loading
 # ---------------------------------------------------------------------------
 
+def _is_medgemma(model_id: str) -> bool:
+    return "medgemma" in model_id.lower()
+
+
 def load_model_and_processor(
     model_id: str,
     load_in_4bit: bool,
     llava_next: bool,
+    processor_id: str | None = None,
 ) -> tuple:
     """Load VLM and processor from HuggingFace.
 
-    Args:
-        model_id: HuggingFace model identifier.
-        load_in_4bit: Whether to apply 4-bit BitsAndBytes quantization.
-        llava_next: Use LlavaNextForConditionalGeneration (LLaVA 1.6).
+    Auto-detects MedGemma models (contain 'medgemma' in the ID) and uses
+    AutoModelForImageTextToText + bfloat16 for them.  All other models use
+    the LLaVA family path.
 
     Returns:
         ``(model, processor)`` tuple ready for inference.
     """
+    if _is_medgemma(model_id):
+        from transformers import AutoModelForImageTextToText
+        logger.info(f"Loading MedGemma model: {model_id}")
+        bnb_cfg = None
+        if load_in_4bit:
+            from transformers import BitsAndBytesConfig
+            bnb_cfg = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+            )
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            quantization_config=bnb_cfg,
+        )
+        model.eval()
+        processor = AutoProcessor.from_pretrained(model_id)
+        logger.info("MedGemma loaded.")
+        return model, processor
+
+    # ── LLaVA family ────────────────────────────────────────────────────────
     kwargs: dict = {
         "torch_dtype": torch.float16,
         "device_map": "auto",
@@ -134,10 +157,14 @@ def load_model_and_processor(
         model_cls = LlavaForConditionalGeneration
 
     logger.info(f"Loading model: {model_id}")
-    model = model_cls.from_pretrained(model_id, **kwargs)
+    model = model_cls.from_pretrained(model_id, _fast_init=False, trust_remote_code=True, **kwargs)
     model.eval()
 
-    processor = AutoProcessor.from_pretrained(model_id)
+    proc_id = processor_id or model_id
+    try:
+        processor = AutoProcessor.from_pretrained(proc_id, trust_remote_code=True)
+    except (ValueError, OSError):
+        processor = LlavaProcessor.from_pretrained(proc_id)
     logger.info("Model loaded.")
     return model, processor
 
@@ -150,10 +177,9 @@ def build_prompt(processor: AutoProcessor, magnification: str) -> str:
     """Return the formatted prompt string for the given magnification.
 
     Tries ``processor.apply_chat_template`` (available for llava-hf models
-    on recent transformers).  Falls back to the LLaVA 1.5 / LLaVA-MED
-    manual ``USER: <image>\\n...\\nASSISTANT:`` format.
+    on recent transformers).  Falls back to the LLaVA 1.5 manual format.
     """
-    question = _PROMPTS[magnification]
+    question = get_prompt(magnification)
 
     if hasattr(processor, "apply_chat_template"):
         conversation = [
@@ -172,7 +198,7 @@ def build_prompt(processor: AutoProcessor, magnification: str) -> str:
         except Exception:
             pass  # fall through to manual format
 
-    # LLaVA 1.5 / LLaVA-MED fallback
+    # LLaVA 1.5 fallback
     return f"USER: <image>\n{question}\nASSISTANT:"
 
 
@@ -187,24 +213,29 @@ def generate_report(
     image: Image.Image,
     magnification: str,
     max_new_tokens: int,
+    is_medgemma: bool = False,
 ) -> str:
-    """Run VLM inference on a single image and return the decoded report.
+    """Run VLM inference on a single image and return the decoded report."""
+    question = get_prompt(magnification)
 
-    Uses greedy decoding (``do_sample=False``) for deterministic,
-    reproducible outputs.
-    """
-    prompt = build_prompt(processor, magnification)
-    inputs = processor(
-        text=prompt, images=image, return_tensors="pt"
-    ).to(model.device)
+    if is_medgemma:
+        messages = [{"role": "user", "content": [
+            {"type": "image", "image": image},
+            {"type": "text",  "text":  question},
+        ]}]
+        text = processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        inputs = processor(text=text, images=image, return_tensors="pt").to(model.device)
+    else:
+        prompt = build_prompt(processor, magnification)
+        inputs = processor(text=prompt, images=image, return_tensors="pt").to(model.device)
 
     output_ids = model.generate(
         **inputs,
         max_new_tokens=max_new_tokens,
         do_sample=False,
     )
-
-    # Slice off the prompt tokens; decode only the generated part
     new_tokens = output_ids[0, inputs["input_ids"].shape[1]:]
     return processor.decode(new_tokens, skip_special_tokens=True).strip()
 
@@ -307,6 +338,15 @@ def parse_args() -> argparse.Namespace:
         "--llava_next", action="store_true",
         help="Use LlavaNextForConditionalGeneration (for LLaVA 1.6 / NeXT models).",
     )
+    p.add_argument(
+        "--processor_id", default=None,
+        help=(
+            "HuggingFace model ID to load the processor from. "
+            "Use when the model repo lacks preprocessor_config.json "
+            "(e.g. microsoft/llava-med-v1.5-mistral-7b). "
+            "Example: llava-hf/llava-v1.6-mistral-7b-hf"
+        ),
+    )
     return p.parse_args()
 
 
@@ -342,8 +382,9 @@ def main() -> None:
 
     # --- Load VLM ---
     model, processor = load_model_and_processor(
-        args.model, args.load_in_4bit, args.llava_next
+        args.model, args.load_in_4bit, args.llava_next, args.processor_id
     )
+    medgemma = _is_medgemma(args.model)
 
     # --- Open CSV in append mode; write header only for new files ---
     is_new_file = not output_csv.exists() or output_csv.stat().st_size == 0
@@ -363,6 +404,7 @@ def main() -> None:
                 report = generate_report(
                     model, processor, image,
                     sample["magnification"], args.max_new_tokens,
+                    is_medgemma=medgemma,
                 )
                 writer.writerow({
                     "image_path":    sample["image_path"],

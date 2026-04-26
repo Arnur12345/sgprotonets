@@ -99,20 +99,17 @@ def meta_test(
         support_labels = support["label"].to(device)
         query_labels_dev = query_labels.to(device)
 
-        # Determine text availability
-        support_texts = support["report"]
-        query_texts = query["report"]
-        text_strategy = cfg.inference.text_strategy
-
+        # Privileged-text formulation: reports never enter the prototype path.
+        # Inference uses images + class anchors only, identical to validation.
         episode_out = model.forward_episode(
             support_images=support_images,
-            support_texts=support_texts,
+            support_texts=None,
             support_labels=support_labels,
             query_images=query_images,
-            query_texts=query_texts,
+            query_texts=None,
             n_way=ep_cfg.n_way,
             class_semantic_embeds=class_anchors,
-            text_strategy=text_strategy,
+            text_strategy="class_anchors",
         )
 
         preds = episode_out["logits"].argmax(dim=-1)
@@ -231,18 +228,20 @@ def meta_test_multilabel(
         episode_anchors = class_anchors[episode_labels]
         episode_sample_counts = [sample_counts[l] for l in episode_labels]
 
+        # Privileged-text formulation: reports never enter the prototype path.
         episode_out = model.forward_binary_episode(
             support_pos_images=support_pos_images,
-            support_pos_texts=support_pos["report"],
+            support_pos_texts=None,
             support_neg_images=support_neg_images,
-            support_neg_texts=support_neg["report"],
+            support_neg_texts=None,
             query_images=query_images,
-            query_texts=query["report"],
+            query_texts=None,
             n_labels=n_labels,
             k_pos=k_pos,
             k_neg=k_neg,
             class_semantic_embeds=episode_anchors,
             label_sample_counts=episode_sample_counts,
+            text_strategy="class_anchors",
         )
 
         logits = episode_out["binary_logits"]

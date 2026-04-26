@@ -186,7 +186,7 @@ class BreakHisDataset(Dataset):
         image_size: int = 224,
         is_train: bool = True,
     ) -> None:
-        self.data_dir = Path(data_dir)
+        self.data_dir = Path(data_dir).resolve()
         self.label_mode = label_mode
         self.transform: Compose = get_image_transform(image_size, is_train)
 

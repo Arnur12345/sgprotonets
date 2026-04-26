@@ -114,6 +114,12 @@ def unpack_episode(
         "label": batch["label"][n_support:],
     }
 
+    # Pass through optional metadata (magnification, class_name, etc.)
+    for key in ("magnification", "class_name"):
+        if key in batch:
+            support[key] = batch[key][:n_support]
+            query[key] = batch[key][n_support:]
+
     # Remap labels to 0..N-1 within the episode
     # Support labels are ordered: k_shot copies of class 0, k_shot of class 1, etc.
     support_episode_labels = torch.arange(n_way).repeat_interleave(k_shot)
