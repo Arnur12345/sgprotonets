@@ -2,6 +2,7 @@
 
 import logging
 import random
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
@@ -533,11 +534,15 @@ class Trainer:
             epoch_exact_match = 0.0
             n_episodes = 0
 
+            # Parallel image fetch: PIL decode+resize releases the GIL, so
+            # threads scale well and keep the GPU fed during episode loading.
+            io_executor = ThreadPoolExecutor(max_workers=8)
+
             # Iterate through sampler directly
             for episode_meta in train_sampler:
-                # Fetch samples for this episode
+                # Fetch samples for this episode (parallelized)
                 indices = episode_meta["indices"]
-                samples = [train_dataset[i] for i in indices]
+                samples = list(io_executor.map(train_dataset.__getitem__, indices))
                 batch = binary_episode_collate_fn(samples)
 
                 episode_labels = episode_meta["episode_labels"]
@@ -680,9 +685,10 @@ class Trainer:
         total_exact = 0.0
         n_episodes = 0
 
+        val_io_executor = ThreadPoolExecutor(max_workers=8)
         for episode_meta in val_sampler:
             indices = episode_meta["indices"]
-            samples = [val_dataset[i] for i in indices]
+            samples = list(val_io_executor.map(val_dataset.__getitem__, indices))
             batch = binary_episode_collate_fn(samples)
 
             episode_labels = episode_meta["episode_labels"]
