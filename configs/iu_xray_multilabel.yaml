@@ -16,10 +16,25 @@ data:
   image_size: 224
 
   # Train/val class split — keep classes with enough positives for binary episodes.
-  # train: 5 high-prevalence labels; val: 5 different labels (held-out to test
-  # generalization to "novel" diseases described only by their class anchor).
-  train_classes: ["effusion", "cardiomegaly", "infiltrate", "pneumothorax", "emphysema"]
-  val_classes:   ["mass", "nodule", "pneumonia", "atelectasis", "consolidation"]
+  # train: 10 well-populated labels for episode diversity in meta-learning.
+  # val:   4 rare/held-out labels — tests few-shot transfer to "novel" diseases
+  #        described only by their class anchor.
+  train_classes:
+    - "effusion"
+    - "pneumothorax"
+    - "consolidation"
+    - "infiltrate"
+    - "atelectasis"
+    - "edema"
+    - "cardiomegaly"
+    - "nodule"
+    - "pneumonia"
+    - "mass"
+  val_classes:
+    - "emphysema"
+    - "hernia"
+    - "pleural_thickening"
+    - "fibrosis"
   test_classes:  []
 
 multilabel:
