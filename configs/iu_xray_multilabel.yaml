@@ -10,15 +10,46 @@
 
 seed: 42
 
+# ── Model — unfreeze last ViT blocks for medical adaptation ─────────────────
+model:
+  d_model: 192
+  d_visual: 768
+  d_semantic: 768
+  d_hidden: 384
+
+  visual_encoder:
+    name: "google/vit-base-patch16-224"
+    type: "vit"
+    freeze: true
+    unfreeze_last_n_blocks: 2   # was 0 — generic ImageNet features cannot
+                                # discriminate chest pathologies. Unfreezing the
+                                # last 2 transformer blocks is the single biggest
+                                # win for medical few-shot.
+
+  semantic_encoder:
+    name: "google-bert/bert-base-uncased"
+    type: "bert"
+    freeze: true
+    unfreeze_last_n_blocks: 0
+    max_length: 256
+
+  sgam:
+    num_heads: 4
+    dropout: 0.1
+  fusion:
+    dropout: 0.1
+  vis2sem:
+    d_hidden: 512
+
+  distance: "cosine"
+  prototype_mode: "vanilla"
+
 data:
   dataset: "iu_xray"
-  data_dir: "data/processed_ml/"     # multi-label metadata, symlinked images
+  data_dir: "data/processed_ml/"
   image_size: 224
 
-  # Train/val class split — keep classes with enough positives for binary episodes.
-  # train: 10 well-populated labels for episode diversity in meta-learning.
-  # val:   4 rare/held-out labels — tests few-shot transfer to "novel" diseases
-  #        described only by their class anchor.
+  # 10 well-populated train classes; 4 rare held-out val classes.
   train_classes:
     - "effusion"
     - "pneumothorax"
@@ -40,15 +71,20 @@ data:
 multilabel:
   enabled: true
   n_labels: 5
-  k_pos: 3
+  k_pos: 5            # was 3 — more support → cleaner positive prototypes
   k_neg: 5
   q_query: 10
   anchor_weight_adaptive: true
-  use_focal_loss: true
+
+  # Episodes are already balanced (k_pos≈k_neg). focal_alpha=0.25 explicitly
+  # de-weights positives — exactly the wrong direction. Switch to plain BCE.
+  use_focal_loss: false
   focal_gamma: 2.0
-  focal_alpha: 0.25
-  lambda_margin: 0.1
-  threshold: 0.5
+  focal_alpha: 0.5
+
+  lambda_margin: 0.2  # was 0.1 — push pos/neg prototypes further apart
+  threshold: 0.4      # was 0.5 — under-confident model needs lower threshold
+                      # to recover recall on the 4 rare val classes
   min_positives: 3
   min_negatives: 10
 
@@ -57,27 +93,27 @@ training:
 
   phase1:
     enabled: true
-    num_epochs: 15
-    batch_size: 16
-    lr: 1e-4
+    num_epochs: 10    # was 15 — fewer epochs since we now fine-tune ViT
+    batch_size: 12    # was 16 — leave VRAM for the unfrozen ViT blocks
+    lr: 5e-5          # was 1e-4 — lower LR for fine-tuning
     weight_decay: 1e-4
 
   phase2:
     num_epochs: 40
-    episodes_per_epoch: 250
-    lr: 1e-4
+    episodes_per_epoch: 400   # was 250 — more diversity per epoch
+    lr: 5e-5                  # was 1e-4 — lower LR for ViT fine-tune stability
     weight_decay: 1e-4
-    lambda_align: 0.5      # InfoNCE between v_cls_proj and report embedding
-    lambda_vis2sem: 0.5    # MSE between vis2sem(v_cls_proj) and report embedding
-    lambda_consist: 0.0    # disabled — f_final is built from class anchors
+    lambda_align: 0.2         # was 0.5 — less text-driven shaping
+    lambda_vis2sem: 0.2       # was 0.5 — less text-driven shaping
+    lambda_consist: 0.0
 
   optimizer: "adamw"
   scheduler:
     name: "cosine"
-    warmup_epochs: 5
+    warmup_epochs: 3          # was 5 — shorter warmup, more time at peak LR
     min_lr: 1e-6
 
-  val_episodes: 100
+  val_episodes: 200           # was 100 — halve val variance
   val_every_n_epochs: 5
 
   checkpoint_dir: "checkpoints/iu_xray_multilabel/"
