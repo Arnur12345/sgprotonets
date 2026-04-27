@@ -1,0 +1,31 @@
+# Core deep learning
+torch>=2.0
+torchvision>=0.15
+
+# Transformers / encoders
+transformers>=4.30,<5.0
+open_clip_torch>=2.20
+
+# Config / logging
+omegaconf>=2.3
+wandb>=0.15
+tqdm>=4.65
+
+# Data
+pandas>=2.0
+numpy>=1.24
+pillow>=10.0
+
+# NLP / text preprocessing
+nltk>=3.8
+
+# Scientific
+scipy>=1.10
+scikit-learn>=1.3
+
+# Plotting (used by evaluation/visualize.py and analysis scripts)
+matplotlib>=3.7
+
+# Dev / testing (optional — installed via `pip install -e .[dev]`)
+pytest>=7.0
+pytest-cov>=4.0

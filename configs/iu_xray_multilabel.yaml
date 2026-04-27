@@ -1,0 +1,81 @@
+# IU Chest X-Ray, MULTI-LABEL with binary decomposition.
+#
+# Privileged-text formulation: reports drive only the alignment + vis2sem
+# auxiliary losses on positive-support visual features. They never reach
+# forward_binary_episode, the prototypes, or the logits — at training,
+# validation, OR test time. See training/episode_loop.py.
+#
+# Usage:
+#   python scripts/train.py --config configs/iu_xray_multilabel.yaml
+
+seed: 42
+
+data:
+  dataset: "iu_xray"
+  data_dir: "data/processed_ml/"     # multi-label metadata, symlinked images
+  image_size: 224
+
+  # Train/val class split — keep classes with enough positives for binary episodes.
+  # train: 5 high-prevalence labels; val: 5 different labels (held-out to test
+  # generalization to "novel" diseases described only by their class anchor).
+  train_classes: ["effusion", "cardiomegaly", "infiltrate", "pneumothorax", "emphysema"]
+  val_classes:   ["mass", "nodule", "pneumonia", "atelectasis", "consolidation"]
+  test_classes:  []
+
+multilabel:
+  enabled: true
+  n_labels: 5
+  k_pos: 3
+  k_neg: 5
+  q_query: 10
+  anchor_weight_adaptive: true
+  use_focal_loss: true
+  focal_gamma: 2.0
+  focal_alpha: 0.25
+  lambda_margin: 0.1
+  threshold: 0.5
+  min_positives: 3
+  min_negatives: 10
+
+training:
+  use_amp: true
+
+  phase1:
+    enabled: true
+    num_epochs: 15
+    batch_size: 16
+    lr: 1e-4
+    weight_decay: 1e-4
+
+  phase2:
+    num_epochs: 40
+    episodes_per_epoch: 250
+    lr: 1e-4
+    weight_decay: 1e-4
+    lambda_align: 0.5      # InfoNCE between v_cls_proj and report embedding
+    lambda_vis2sem: 0.5    # MSE between vis2sem(v_cls_proj) and report embedding
+    lambda_consist: 0.0    # disabled — f_final is built from class anchors
+
+  optimizer: "adamw"
+  scheduler:
+    name: "cosine"
+    warmup_epochs: 5
+    min_lr: 1e-6
+
+  val_episodes: 100
+  val_every_n_epochs: 5
+
+  checkpoint_dir: "checkpoints/iu_xray_multilabel/"
+  save_best: true
+  save_every_n_epochs: 10
+
+inference:
+  text_strategy: "class_anchors"
+  num_eval_episodes: 600
+  confidence_interval: 0.95
+
+logging:
+  use_wandb: false
+  wandb_project: "sgprotonet-iu-multilabel"
+  wandb_entity: null
+  log_every_n_steps: 10
