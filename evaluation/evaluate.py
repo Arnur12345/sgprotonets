@@ -175,9 +175,13 @@ def meta_test_multilabel(
         is_train=False,
     )
 
+    # Cap n_labels at the number of classes available in this split.
+    # Held-out val/test splits often have fewer classes than train.
+    eval_n_labels = min(ml_cfg.n_labels, dataset.num_classes)
+
     sampler = BinaryEpisodeSampler(
         dataset=dataset,
-        n_labels=ml_cfg.n_labels,
+        n_labels=eval_n_labels,
         k_pos=ml_cfg.k_pos,
         k_neg=ml_cfg.k_neg,
         q_query=ml_cfg.q_query,
