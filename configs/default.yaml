@@ -17,8 +17,8 @@ model:
     unfreeze_last_n_blocks: 0
 
   semantic_encoder:
-    name: "google-bert/bert-base-uncased"  # Standard BERT (generic, not biomedical)
-    type: "bert"  # "biomedclip" | "pubmedbert" | "biobert" | "bert"
+    name: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
+    type: "pubmedbert"  # "biomedclip" | "pubmedbert" | "biobert" | "bert"
     freeze: true
     unfreeze_last_n_blocks: 0
     max_length: 256
