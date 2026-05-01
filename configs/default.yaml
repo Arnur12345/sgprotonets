@@ -34,7 +34,7 @@ model:
     d_hidden: 512
 
   distance: "cosine"  # "cosine" | "euclidean"
-  prototype_mode: "vanilla"  # "vanilla" | "semantic_weighted"
+  prototype_mode: "vanilla"  # "vanilla" | "semantic_weighted" | "bayesian_map"
 
 # Few-shot episode settings
 episode:

@@ -160,14 +160,20 @@ class DualPrototypeComputation(nn.Module):
         P⁺_l = (weighted) mean of features where label l IS present
         P⁻_l = mean of features where label l is ABSENT
 
-    Supports adaptive semantic anchor blending for rare labels:
-        P⁺_l = (1 - α) * visual_mean + α * semantic_anchor
-        where α increases as sample count decreases.
+    Supports three modes for the positive prototype:
+        - "vanilla": simple mean of positive support features.
+        - "semantic_weighted": cosine-similarity-weighted mean against the anchor.
+        - "bayesian_map": closed-form Gaussian posterior mean treating the
+            semantic anchor as the prior mean and the support features as iid
+            Gaussian observations. The prior and likelihood variances are
+            learned via two scalar parameters (log_sigma_prior, log_sigma_lik).
+
+    Negative prototypes are always a plain mean.
 
     Args:
-        mode: "vanilla" for simple mean, "semantic_weighted" for similarity-weighted.
-        use_adaptive_anchor: If True, adaptively blend positive prototypes with
-            semantic anchors based on sample count.
+        mode: "vanilla" | "semantic_weighted" | "bayesian_map".
+        use_adaptive_anchor: If True (and mode is not "bayesian_map"), adaptively
+            blend positive prototypes with semantic anchors based on sample count.
         fixed_anchor_weight: If use_adaptive_anchor is False, use this fixed weight.
     """
 
@@ -181,6 +187,12 @@ class DualPrototypeComputation(nn.Module):
         self.mode = mode
         self.use_adaptive_anchor = use_adaptive_anchor
         self.fixed_anchor_weight = fixed_anchor_weight
+
+        # Learnable Gaussian-conjugate scalars for "bayesian_map" mode.
+        # Parameterized in log-space to keep variances strictly positive.
+        # Init at 0 ⇒ σ_prior = σ_lik = 1, so α = k/(1+k) at the start.
+        self.log_sigma_prior = nn.Parameter(torch.zeros(()))
+        self.log_sigma_lik = nn.Parameter(torch.zeros(()))
 
     def forward(
         self,
@@ -215,7 +227,10 @@ class DualPrototypeComputation(nn.Module):
         pos_reshaped = support_pos_features.view(n_labels, k_pos, d_model)
         neg_reshaped = support_neg_features.view(n_labels, k_neg, d_model)
 
-        if self.mode == "semantic_weighted" and class_semantics is not None:
+        if self.mode == "bayesian_map" and class_semantics is not None:
+            # Closed-form Gaussian posterior mean — replaces anchor blending.
+            prototypes_pos = self._bayesian_map_pos(pos_reshaped, class_semantics)
+        elif self.mode == "semantic_weighted" and class_semantics is not None:
             prototypes_pos = self._semantic_weighted_pos(pos_reshaped, class_semantics)
         else:
             # Vanilla: simple mean
@@ -224,13 +239,48 @@ class DualPrototypeComputation(nn.Module):
         # Negative prototypes: always simple mean (no semantic guidance)
         prototypes_neg = neg_reshaped.mean(dim=1)  # (n_labels, d_model)
 
-        # Apply anchor blending for positive prototypes (skip if fully disabled)
-        if class_semantics is not None and (self.use_adaptive_anchor or self.fixed_anchor_weight > 0):
+        # Legacy anchor blending for non-Bayesian modes.
+        if (
+            self.mode != "bayesian_map"
+            and class_semantics is not None
+            and (self.use_adaptive_anchor or self.fixed_anchor_weight > 0)
+        ):
             prototypes_pos = self._apply_anchor_blending(
                 prototypes_pos, class_semantics, label_sample_counts
             )
 
         return prototypes_pos, prototypes_neg
+
+    def _bayesian_map_pos(
+        self,
+        features: torch.Tensor,
+        anchors: torch.Tensor,
+    ) -> torch.Tensor:
+        """Closed-form Gaussian posterior mean for the positive prototype.
+
+        Prior:       μ ~ N(anchor, σ²_prior · I)
+        Likelihood:  xᵢ | μ ~ N(μ, σ²_lik · I),  i = 1..k
+
+        Posterior mean:
+            μ_MAP = (σ²_lik · anchor + k · σ²_prior · x̄) / (σ²_lik + k · σ²_prior)
+                  = (1 - α) · anchor + α · x̄,
+            where α = k · σ²_prior / (σ²_lik + k · σ²_prior).
+
+        Args:
+            features: (n_labels, k_pos, d_model)
+            anchors: (n_labels, d_model)
+
+        Returns:
+            (n_labels, d_model)
+        """
+        k = features.shape[1]
+        sample_mean = features.mean(dim=1)  # (n_labels, d_model)
+
+        sigma2_prior = torch.exp(2.0 * self.log_sigma_prior)
+        sigma2_lik = torch.exp(2.0 * self.log_sigma_lik)
+
+        alpha = (k * sigma2_prior) / (sigma2_lik + k * sigma2_prior)
+        return alpha * sample_mean + (1.0 - alpha) * anchors
 
     def _semantic_weighted_pos(
         self,

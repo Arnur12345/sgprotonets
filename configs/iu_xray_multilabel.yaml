@@ -42,7 +42,9 @@ model:
     d_hidden: 512
 
   distance: "cosine"
-  prototype_mode: "vanilla"
+  prototype_mode: "bayesian_map"  # closed-form Gaussian posterior mean
+                                  # for positive prototypes, with learnable
+                                  # log_sigma_prior / log_sigma_lik scalars.
 
 data:
   dataset: "iu_xray"
