@@ -27,10 +27,10 @@ model:
                                 # win for medical few-shot.
 
   semantic_encoder:
-    name: "google-bert/bert-base-uncased"
-    type: "bert"
+    name: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
+    type: "pubmedbert"
     freeze: true
-    unfreeze_last_n_blocks: 0
+    unfreeze_last_n_blocks: 2
     max_length: 256
 
   sgam:
