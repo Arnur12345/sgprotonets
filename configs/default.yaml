@@ -17,7 +17,7 @@ model:
     unfreeze_last_n_blocks: 0
 
   semantic_encoder:
-    name: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
+    name: "microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext"
     type: "pubmedbert"  # "biomedclip" | "pubmedbert" | "biobert" | "bert"
     freeze: true
     unfreeze_last_n_blocks: 0
